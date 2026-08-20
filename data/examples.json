@@ -1,0 +1,13 @@
+{
+  "connection": {
+    "database_type": "POSTGRESQL",
+    "host": "localhost",
+    "port": 5432,
+    "database_name": "clinical"
+  },
+  "scopes": [
+    "COLUMN_CLASSIFICATION",
+    "DEPENDENCY_MAP",
+    "HIPAA_COMPLIANCE"
+  ]
+}

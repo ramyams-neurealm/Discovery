@@ -1,0 +1,47 @@
+from enum import Enum
+
+
+class DatabaseType(str, Enum):
+    POSTGRESQL = "POSTGRESQL"
+    MYSQL = "MYSQL"
+    SQL_SERVER = "SQL_SERVER"
+    ORACLE = "ORACLE"
+
+
+class DiscoveryScope(str, Enum):
+    COLUMN_CLASSIFICATION = "COLUMN_CLASSIFICATION"
+    DEPENDENCY_MAP = "DEPENDENCY_MAP"
+    HIPAA_COMPLIANCE = "HIPAA_COMPLIANCE"
+
+
+class RunStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    PARTIALLY_COMPLETED = "PARTIALLY_COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class StageStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    COMPLETED_WITH_WARNINGS = "COMPLETED_WITH_WARNINGS"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+class DisplayClassification(str, Enum):
+    PUBLIC = "PUBLIC"
+    PII = "PII"
+    PHI = "PHI"
+    FINANCIAL = "FINANCIAL"
+    SENSITIVE = "SENSITIVE"
+
+
+class HipaaSeverity(str, Enum):
+    GOOD = "GOOD"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    SERIOUS = "SERIOUS"
+    CRITICAL = "CRITICAL"
