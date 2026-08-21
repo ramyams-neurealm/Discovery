@@ -4,6 +4,7 @@ from src.models.schemas import ConnectionInput, DiscoveryRunRequest
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.services.database import MetadataDatabase
 from src.api.dependencies import get_database
+from src.tools.connection_tools import test_connection
 
 router = APIRouter()
 
@@ -14,10 +15,34 @@ def health() -> dict:
 
 
 @router.post("/connections/test")
-def test_database_connection(request: ConnectionInput) -> dict:
-    # Wire to Connection Management Service and vendor connector tools.
-    return {"status": "NOT_IMPLEMENTED", "message": "Add vendor connection adapter."}
+def test_database_connection(
+    request: ConnectionInput,
+) -> dict:
+    safe_config = {
+        "host": request.host,
+        "port": request.port,
+        "database_name": request.database_name,
+        "username": request.username,
+        "ssl_enabled": request.ssl_enabled,
+    }
 
+    result = test_connection(
+        database_type=request.database_type,
+        safe_config=safe_config,
+        password=request.password.get_secret_value(),
+    )
+
+    if not result.success:
+        raise HTTPException(
+            status_code=400,
+            detail=result.message,
+        )
+
+    return {
+        "status": "SUCCESS",
+        "message": result.message,
+        "response_time_ms": result.response_time_ms,
+    }
 
 @router.post("/discovery-runs")
 def start_discovery_run(
