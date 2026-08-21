@@ -23,8 +23,15 @@ $$;
 
 -- ============================================================
 -- 1. Saved source database connections
--- Passwords are NOT stored here. credential_reference should
--- point to the password secret in Azure Key Vault.
+--
+-- DEVELOPMENT PROTOTYPE ONLY:
+-- password_plaintext stores disposable dummy credentials.
+-- Do not store staging or production credentials here.
+-- Replace this with encrypted storage or a secret manager
+-- before staging or production.
+--
+-- credential_reference is preserved for a future
+-- secret-manager implementation.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS demooc28.datasource_connections (
@@ -36,7 +43,14 @@ CREATE TABLE IF NOT EXISTS demooc28.datasource_connections (
     database_name VARCHAR(255) NOT NULL,
     username VARCHAR(255) NOT NULL,
     ssl_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    credential_reference VARCHAR(512) NOT NULL,
+
+    -- Future secret-manager reference.
+    credential_reference VARCHAR(512),
+
+    -- DEVELOPMENT PROTOTYPE ONLY.
+    -- Never return this value through APIs or write it to logs.
+    password_plaintext TEXT,
+
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     discovery_status VARCHAR(32) NOT NULL DEFAULT 'NOT_STARTED',
     last_discovered_at TIMESTAMPTZ,
@@ -46,36 +60,109 @@ CREATE TABLE IF NOT EXISTS demooc28.datasource_connections (
 
     CONSTRAINT ck_datasource_connection_name_not_blank
         CHECK (btrim(connection_name) <> ''),
+
     CONSTRAINT ck_datasource_host_not_blank
         CHECK (btrim(host) <> ''),
+
     CONSTRAINT ck_datasource_database_name_not_blank
         CHECK (btrim(database_name) <> ''),
+
     CONSTRAINT ck_datasource_username_not_blank
         CHECK (btrim(username) <> ''),
+
     CONSTRAINT ck_datasource_credential_reference_not_blank
-        CHECK (btrim(credential_reference) <> ''),
+        CHECK (
+            credential_reference IS NULL
+            OR btrim(credential_reference) <> ''
+        ),
+
+    CONSTRAINT ck_datasource_password_not_blank
+        CHECK (
+            password_plaintext IS NULL
+            OR btrim(password_plaintext) <> ''
+        ),
+
+    CONSTRAINT ck_datasource_credential_available
+        CHECK (
+            credential_reference IS NOT NULL
+            OR password_plaintext IS NOT NULL
+        ),
+
     CONSTRAINT ck_datasource_port
         CHECK (port BETWEEN 1 AND 65535),
+
     CONSTRAINT ck_datasource_database_type
-        CHECK (database_type IN (
-            'POSTGRESQL',
-            'MYSQL',
-            'SQL_SERVER',
-            'ORACLE'
-        )),
+        CHECK (
+            database_type IN (
+                'POSTGRESQL',
+                'MYSQL',
+                'SQL_SERVER',
+                'ORACLE'
+            )
+        ),
+
     CONSTRAINT ck_datasource_discovery_status
-        CHECK (discovery_status IN (
-            'NOT_STARTED',
-            'PENDING',
-            'RUNNING',
-            'SUCCEEDED',
-            'PARTIALLY_COMPLETED',
-            'FAILED',
-            'CANCELLED'
-        )),
+        CHECK (
+            discovery_status IN (
+                'NOT_STARTED',
+                'PENDING',
+                'RUNNING',
+                'SUCCEEDED',
+                'PARTIALLY_COMPLETED',
+                'FAILED',
+                'CANCELLED'
+            )
+        ),
+
     CONSTRAINT uq_datasource_connection_name
         UNIQUE (connection_name)
 );
+
+-- ============================================================
+-- Migration for an existing local prototype installation
+--
+-- CREATE TABLE IF NOT EXISTS does not modify a table that
+-- already exists. These statements update an existing table.
+-- ============================================================
+
+ALTER TABLE demooc28.datasource_connections
+    ADD COLUMN IF NOT EXISTS password_plaintext TEXT;
+
+ALTER TABLE demooc28.datasource_connections
+    ALTER COLUMN credential_reference DROP NOT NULL;
+
+ALTER TABLE demooc28.datasource_connections
+    DROP CONSTRAINT IF EXISTS
+        ck_datasource_credential_reference_not_blank;
+
+ALTER TABLE demooc28.datasource_connections
+    ADD CONSTRAINT ck_datasource_credential_reference_not_blank
+    CHECK (
+        credential_reference IS NULL
+        OR btrim(credential_reference) <> ''
+    );
+
+ALTER TABLE demooc28.datasource_connections
+    DROP CONSTRAINT IF EXISTS
+        ck_datasource_password_not_blank;
+
+ALTER TABLE demooc28.datasource_connections
+    ADD CONSTRAINT ck_datasource_password_not_blank
+    CHECK (
+        password_plaintext IS NULL
+        OR btrim(password_plaintext) <> ''
+    );
+
+ALTER TABLE demooc28.datasource_connections
+    DROP CONSTRAINT IF EXISTS
+        ck_datasource_credential_available;
+
+ALTER TABLE demooc28.datasource_connections
+    ADD CONSTRAINT ck_datasource_credential_available
+    CHECK (
+        credential_reference IS NOT NULL
+        OR password_plaintext IS NOT NULL
+    );
 
 -- ============================================================
 -- 2. One historical record per discovery execution
