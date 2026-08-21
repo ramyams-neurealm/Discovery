@@ -4,30 +4,15 @@ BEGIN;
 -- Extensions and schema
 -- ============================================================
 
+BEGIN;
+
+-- ============================================================
+-- Extensions and schema
+-- ============================================================
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE SCHEMA IF NOT EXISTS demooc28;
 
--- ============================================================
--- Shared updated_at trigger
--- ============================================================
-
-CREATE OR REPLACE FUNCTION demooc28.set_updated_at()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$;
-
--- ============================================================
--- 1. Saved source database connections
--- Passwords are NOT stored here. credential_reference should
--- point to the password secret in Azure Key Vault.
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS demooc28.datasource_connections (
+CREATE TABLE IF NOT EXISTS datasource_connections (
     connection_id BIGSERIAL PRIMARY KEY,
     connection_name VARCHAR(255) NOT NULL,
     database_type VARCHAR(32) NOT NULL,
@@ -36,57 +21,26 @@ CREATE TABLE IF NOT EXISTS demooc28.datasource_connections (
     database_name VARCHAR(255) NOT NULL,
     username VARCHAR(255) NOT NULL,
     ssl_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    credential_reference VARCHAR(512) NOT NULL,
+
+    -- Future secret-manager reference.
+    credential_reference VARCHAR(512),
+
+    -- DEVELOPMENT PROTOTYPE ONLY.
+    -- Never return this value through APIs or write it to logs.
+    password_plaintext TEXT,
+
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     discovery_status VARCHAR(32) NOT NULL DEFAULT 'NOT_STARTED',
-    last_discovered_at TIMESTAMPTZ,
-    created_by VARCHAR(255),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT ck_datasource_connection_name_not_blank
-        CHECK (btrim(connection_name) <> ''),
-    CONSTRAINT ck_datasource_host_not_blank
-        CHECK (btrim(host) <> ''),
-    CONSTRAINT ck_datasource_database_name_not_blank
-        CHECK (btrim(database_name) <> ''),
-    CONSTRAINT ck_datasource_username_not_blank
-        CHECK (btrim(username) <> ''),
-    CONSTRAINT ck_datasource_credential_reference_not_blank
-        CHECK (btrim(credential_reference) <> ''),
-    CONSTRAINT ck_datasource_port
-        CHECK (port BETWEEN 1 AND 65535),
-    CONSTRAINT ck_datasource_database_type
-        CHECK (database_type IN (
-            'POSTGRESQL',
-            'MYSQL',
-            'SQL_SERVER',
-            'ORACLE'
-        )),
-    CONSTRAINT ck_datasource_discovery_status
-        CHECK (discovery_status IN (
-            'NOT_STARTED',
-            'PENDING',
-            'RUNNING',
-            'SUCCEEDED',
-            'PARTIALLY_COMPLETED',
-            'FAILED',
-            'CANCELLED'
-        )),
-    CONSTRAINT uq_datasource_connection_name
-        UNIQUE (connection_name)
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- ============================================================
--- 2. One historical record per discovery execution
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS demooc28.discovery_runs (
-    discovery_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    connection_id BIGINT NOT NULL,
-    requested_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
-    effective_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
-    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    discovery_run_id UUID PRIMARY KEY,
+    connection_id BIGINT NOT NULL REFERENCES datasource_connections(connection_id),
+    requested_scopes JSONB NOT NULL,
+    effective_scopes JSONB,
+    status VARCHAR(32) NOT NULL,
     current_stage VARCHAR(64),
     progress_percentage NUMERIC(5,2) NOT NULL DEFAULT 0,
     error_code VARCHAR(64),
