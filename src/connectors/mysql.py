@@ -7,6 +7,8 @@ from src.connectors.common import apply_key_flags, new_column, new_object
 
 
 class MySQLConnector(DatabaseConnector):
+    """MySQL connector for connection testing and complete metadata discovery."""
+
     @property
     def health_query(self) -> str:
         return "SELECT 1"
@@ -41,13 +43,30 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
 
     def discover_metadata(self) -> list[dict[str, Any]]:
+        """Discover tables, views, procedures, functions, columns, PKs, FKs and DDL."""
         database_name = self.config["database_name"]
+        objects = self._discover_tables_and_views(database_name)
+        objects.extend(self._discover_routines(database_name))
+        return objects
+
+    def _discover_tables_and_views(self, database_name: str):
         query = """
-            SELECT table_schema, table_name, table_type
-            FROM information_schema.tables
-            WHERE table_schema = %s
-              AND table_type IN ('BASE TABLE', 'VIEW')
-            ORDER BY table_name
+            SELECT
+                t.TABLE_SCHEMA,
+                t.TABLE_NAME,
+                t.TABLE_TYPE,
+                t.ENGINE,
+                t.TABLE_ROWS,
+                t.TABLE_COLLATION,
+                t.TABLE_COMMENT,
+                v.VIEW_DEFINITION
+            FROM information_schema.TABLES AS t
+            LEFT JOIN information_schema.VIEWS AS v
+              ON v.TABLE_SCHEMA = t.TABLE_SCHEMA
+             AND v.TABLE_NAME = t.TABLE_NAME
+            WHERE t.TABLE_SCHEMA = %s
+              AND t.TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+            ORDER BY t.TABLE_NAME
         """
         cursor = self.connection.cursor()
         try:
@@ -57,24 +76,134 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
 
         objects = []
-        for schema_name, object_name, table_type in rows:
+        for row in rows:
+            (
+                schema_name,
+                object_name,
+                table_type,
+                engine,
+                estimated_rows,
+                collation,
+                comment,
+                view_definition,
+            ) = row
+
             object_type = "TABLE" if table_type == "BASE TABLE" else "VIEW"
-            item = new_object(schema_name, object_name, object_type)
+            object_ddl = self._get_table_or_view_ddl(
+                schema_name,
+                object_name,
+                object_type,
+            )
+            metadata = {
+                "source_table_type": table_type,
+                "engine": engine,
+                "estimated_rows": estimated_rows,
+                "collation": collation,
+                "comment": comment or None,
+            }
+            if object_type == "VIEW":
+                metadata["view_definition"] = view_definition
+
+            item = new_object(
+                schema_name=schema_name,
+                object_name=object_name,
+                object_type=object_type,
+                object_ddl=object_ddl,
+                metadata=metadata,
+            )
             item["columns"] = self._columns(schema_name, object_name)
+
             if object_type == "TABLE":
-                item["primary_key_columns"] = self._primary_keys(schema_name, object_name)
-                item["foreign_keys"] = self._foreign_keys(schema_name, object_name)
+                item["primary_key_columns"] = self._primary_keys(
+                    schema_name,
+                    object_name,
+                )
+                item["foreign_keys"] = self._foreign_keys(
+                    schema_name,
+                    object_name,
+                )
                 apply_key_flags(item)
+
             objects.append(item)
+
         return objects
+
+    def _discover_routines(self, database_name: str):
+        query = """
+            SELECT
+                ROUTINE_SCHEMA,
+                ROUTINE_NAME,
+                ROUTINE_TYPE,
+                DATA_TYPE,
+                SQL_DATA_ACCESS,
+                IS_DETERMINISTIC,
+                SECURITY_TYPE,
+                ROUTINE_COMMENT
+            FROM information_schema.ROUTINES
+            WHERE ROUTINE_SCHEMA = %s
+            ORDER BY ROUTINE_TYPE, ROUTINE_NAME
+        """
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, (database_name,))
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        routines = []
+        for row in rows:
+            (
+                schema_name,
+                routine_name,
+                routine_type,
+                return_type,
+                sql_data_access,
+                deterministic,
+                security_type,
+                comment,
+            ) = row
+            object_type = "PROCEDURE" if routine_type == "PROCEDURE" else "FUNCTION"
+            routines.append(
+                new_object(
+                    schema_name=schema_name,
+                    object_name=routine_name,
+                    object_type=object_type,
+                    object_ddl=self._get_routine_ddl(
+                        schema_name,
+                        routine_name,
+                        object_type,
+                    ),
+                    metadata={
+                        "return_type": return_type,
+                        "sql_data_access": sql_data_access,
+                        "is_deterministic": deterministic,
+                        "security_type": security_type,
+                        "comment": comment or None,
+                    },
+                )
+            )
+
+        return routines
 
     def _columns(self, schema_name: str, object_name: str):
         query = """
-            SELECT column_name, ordinal_position, column_type, is_nullable,
-                   column_default, data_type
-            FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s
-            ORDER BY ordinal_position
+            SELECT
+                COLUMN_NAME,
+                ORDINAL_POSITION,
+                COLUMN_TYPE,
+                IS_NULLABLE,
+                COLUMN_DEFAULT,
+                DATA_TYPE,
+                CHARACTER_SET_NAME,
+                COLLATION_NAME,
+                COLUMN_KEY,
+                EXTRA,
+                COLUMN_COMMENT,
+                GENERATION_EXPRESSION
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s
+              AND TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
         """
         cursor = self.connection.cursor()
         try:
@@ -82,18 +211,38 @@ class MySQLConnector(DatabaseConnector):
             rows = cursor.fetchall()
         finally:
             cursor.close()
-        return [
-            new_column(row[0], row[1], row[2].upper(), row[3] == "YES", row[4], row[5])
-            for row in rows
-        ]
+
+        columns = []
+        for row in rows:
+            column = new_column(
+                column_name=row[0],
+                ordinal_position=row[1],
+                data_type=str(row[2]).upper(),
+                nullable=row[3] == "YES",
+                default_value=row[4],
+                native_data_type=row[5],
+            )
+            column["column_metadata"] = {
+                "character_set": row[6],
+                "collation": row[7],
+                "column_key": row[8] or None,
+                "extra": row[9] or None,
+                "comment": row[10] or None,
+                "generation_expression": row[11] or None,
+                "auto_increment": "auto_increment" in (row[9] or "").lower(),
+                "generated": bool(row[11]),
+            }
+            columns.append(column)
+        return columns
 
     def _primary_keys(self, schema_name: str, table_name: str):
         query = """
-            SELECT column_name
-            FROM information_schema.key_column_usage
-            WHERE table_schema = %s AND table_name = %s
-              AND constraint_name = 'PRIMARY'
-            ORDER BY ordinal_position
+            SELECT COLUMN_NAME
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = %s
+              AND TABLE_NAME = %s
+              AND CONSTRAINT_NAME = 'PRIMARY'
+            ORDER BY ORDINAL_POSITION
         """
         cursor = self.connection.cursor()
         try:
@@ -104,12 +253,18 @@ class MySQLConnector(DatabaseConnector):
 
     def _foreign_keys(self, schema_name: str, table_name: str):
         query = """
-            SELECT constraint_name, column_name, referenced_table_schema,
-                   referenced_table_name, referenced_column_name
-            FROM information_schema.key_column_usage
-            WHERE table_schema = %s AND table_name = %s
-              AND referenced_table_name IS NOT NULL
-            ORDER BY constraint_name, ordinal_position
+            SELECT
+                CONSTRAINT_NAME,
+                COLUMN_NAME,
+                REFERENCED_TABLE_SCHEMA,
+                REFERENCED_TABLE_NAME,
+                REFERENCED_COLUMN_NAME,
+                POSITION_IN_UNIQUE_CONSTRAINT
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = %s
+              AND TABLE_NAME = %s
+              AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
         """
         cursor = self.connection.cursor()
         try:
@@ -117,6 +272,7 @@ class MySQLConnector(DatabaseConnector):
             rows = cursor.fetchall()
         finally:
             cursor.close()
+
         return [
             {
                 "constraint_name": row[0],
@@ -126,6 +282,61 @@ class MySQLConnector(DatabaseConnector):
                 "target_schema": row[2],
                 "target_table": row[3],
                 "target_column": row[4],
+                "position_in_unique_constraint": row[5],
             }
             for row in rows
         ]
+
+    def _get_table_or_view_ddl(
+        self,
+        schema_name: str,
+        object_name: str,
+        object_type: str,
+    ) -> str | None:
+        keyword = "VIEW" if object_type == "VIEW" else "TABLE"
+        query = (
+            f"SHOW CREATE {keyword} "
+            f"{self._quote(schema_name)}.{self._quote(object_name)}"
+        )
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query)
+            row = cursor.fetchone()
+        except Exception:
+            return None
+        finally:
+            cursor.close()
+
+        if not row:
+            return None
+        return str(row[1]) if len(row) > 1 and row[1] is not None else None
+
+    def _get_routine_ddl(
+        self,
+        schema_name: str,
+        routine_name: str,
+        object_type: str,
+    ) -> str | None:
+        query = (
+            f"SHOW CREATE {object_type} "
+            f"{self._quote(schema_name)}.{self._quote(routine_name)}"
+        )
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query)
+            row = cursor.fetchone()
+        except Exception:
+            return None
+        finally:
+            cursor.close()
+
+        if not row:
+            return None
+        for value in row[1:]:
+            if isinstance(value, str) and "CREATE" in value.upper():
+                return value
+        return None
+
+    @staticmethod
+    def _quote(identifier: str) -> str:
+        return "`" + identifier.replace("`", "``") + "`"
