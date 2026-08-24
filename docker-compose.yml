@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16
+    container_name: discovery-postgres
     environment:
       POSTGRES_DB: dbanalysis
       POSTGRES_USER: postgres
