@@ -79,7 +79,11 @@ def _profile_column(
     column_name = column["column_name"]
     table_ref = _table_reference(source_connector, schema_name, table_name)
     column_ref = _quote_identifier(source_connector, column_name)
-
+    distinct_column_ref = _distinct_expression(
+        source_connector=source_connector,
+        column=column,
+        column_ref=column_ref,
+    )
     null_count = _scalar(
         source_connector,
         f"SELECT COUNT(*) FROM {table_ref} WHERE {column_ref} IS NULL",
@@ -87,14 +91,16 @@ def _profile_column(
     distinct_count = _scalar(
         source_connector,
         (
-            f"SELECT COUNT(DISTINCT {column_ref}) "
-            f"FROM {table_ref} WHERE {column_ref} IS NOT NULL"
+            f"SELECT COUNT(DISTINCT {distinct_column_ref}) "
+            f"FROM {table_ref} "
+            f"WHERE {column_ref} IS NOT NULL"
         ),
     )
     raw_samples = _sample_values(
-        source_connector,
-        table_ref,
-        column_ref,
+        source_connector=source_connector,
+        table_ref=table_ref,
+        column_ref=column_ref,
+        sample_expression=distinct_column_ref,
     )
 
     null_percentage = (
@@ -130,32 +136,81 @@ def _profile_column(
 def _row_count_query(source_connector: Any, schema_name: str, table_name: str):
     return f"SELECT COUNT(*) FROM {_table_reference(source_connector, schema_name, table_name)}"
 
+def _distinct_expression(
+    source_connector: Any,
+    column: dict[str, Any],
+    column_ref: str,
+) -> str:
+    """
+    Return a SQL expression that supports DISTINCT operations.
 
-def _sample_values(source_connector: Any, table_ref: str, column_ref: str):
+    PostgreSQL JSON has no equality operator, so JSON values are
+    converted to text for distinct counting and sample selection.
+    """
+
     vendor = _vendor(source_connector)
+
+    native_data_type = str(
+        column.get("native_data_type")
+        or column.get("data_type")
+        or ""
+    ).strip().lower()
+
+    if (
+        vendor == "POSTGRESQL"
+        and native_data_type == "json"
+    ):
+        return f"CAST({column_ref} AS TEXT)"
+
+    return column_ref
+
+def _sample_values(
+    source_connector: Any,
+    table_ref: str,
+    column_ref: str,
+    sample_expression: str,
+):
+    """
+    Return distinct non-null sample values.
+
+    sample_expression may differ from column_ref for source types
+    that do not support equality, such as PostgreSQL JSON.
+    """
+
+    vendor = _vendor(source_connector)
+
     if vendor == "SQL_SERVER":
         query = (
-            f"SELECT DISTINCT TOP {MAX_SAMPLE_VALUES} {column_ref} "
-            f"FROM {table_ref} WHERE {column_ref} IS NOT NULL"
+            f"SELECT DISTINCT TOP {MAX_SAMPLE_VALUES} "
+            f"{sample_expression} "
+            f"FROM {table_ref} "
+            f"WHERE {column_ref} IS NOT NULL"
         )
+
     elif vendor == "ORACLE":
         query = (
-            f"SELECT DISTINCT {column_ref} FROM {table_ref} "
+            f"SELECT DISTINCT {sample_expression} "
+            f"FROM {table_ref} "
             f"WHERE {column_ref} IS NOT NULL "
             f"FETCH FIRST {MAX_SAMPLE_VALUES} ROWS ONLY"
         )
+
     else:
         query = (
-            f"SELECT DISTINCT {column_ref} FROM {table_ref} "
-            f"WHERE {column_ref} IS NOT NULL LIMIT {MAX_SAMPLE_VALUES}"
+            f"SELECT DISTINCT {sample_expression} "
+            f"FROM {table_ref} "
+            f"WHERE {column_ref} IS NOT NULL "
+            f"LIMIT {MAX_SAMPLE_VALUES}"
         )
 
     cursor = source_connector.connection.cursor()
+
     try:
         cursor.execute(query)
         rows = cursor.fetchall()
     finally:
         cursor.close()
+
     return [row[0] for row in rows]
 
 

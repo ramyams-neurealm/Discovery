@@ -41,15 +41,15 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT table_schema, table_name, table_type
             FROM information_schema.tables
             WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-              AND table_schema NOT LIKE 'pg_temp_%'
-              AND table_schema NOT LIKE 'pg_toast_temp_%'
+              AND table_schema NOT LIKE 'pg_temp_%%'
+              AND table_schema NOT LIKE 'pg_toast_temp_%%'
               AND table_type IN ('BASE TABLE', 'VIEW')
         """
         params: list[Any] = []
         if schema_filter:
             query += " AND table_schema = %s"
             params.append(schema_filter)
-        query += " ORDER BY table_schema, table_name"
+        query += " ORDER BY table_schema, table_name "
 
         with self.connection.cursor() as cursor:
             cursor.execute(query, params)

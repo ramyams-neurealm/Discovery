@@ -673,21 +673,52 @@ class DiscoveryRepository:
         edges,
         objects: list[dict[str, Any]],
     ):
-        """Persist dependency edges and return records with generated IDs."""
+        """
+        Persist dependency edges whose source and target objects
+        are both included in the current discovery run.
+
+        References outside a limited smoke-test object set are
+        skipped instead of failing the entire discovery run.
+        """
+
         object_ids_by_name = {
-            f"{item['schema_name']}.{item['object_name']}": item["object_id"]
+            (
+                f"{item['schema_name']}."
+                f"{item['object_name']}"
+            ): item["object_id"]
             for item in objects
         }
+
         saved_edges = []
 
         for edge in edges:
+            payload = (
+                edge.model_dump()
+                if hasattr(edge, "model_dump")
+                else dict(edge)
+            )
+
+            source_name = payload["source_object"]
+            target_name = payload["target_object"]
+
+            if source_name not in object_ids_by_name:
+                continue
+
+            if target_name not in object_ids_by_name:
+                continue
+
             edge_id = self.save_dependency_edge(
                 run_id=run_id,
                 edge=edge,
                 object_ids_by_name=object_ids_by_name,
             )
-            payload = edge.model_dump() if hasattr(edge, "model_dump") else dict(edge)
-            saved_edges.append({**payload, "edge_id": edge_id})
+
+            saved_edges.append(
+                {
+                    **payload,
+                    "edge_id": edge_id,
+                }
+            )
 
         return saved_edges
 
