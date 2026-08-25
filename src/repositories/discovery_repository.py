@@ -699,6 +699,7 @@ class DiscoveryRepository:
         agent_version: str = "hipaa-agent-v1",
     ) -> int:
         """Insert or update one HIPAA finding."""
+
         payload = (
             finding.model_dump()
             if hasattr(finding, "model_dump")
@@ -706,8 +707,35 @@ class DiscoveryRepository:
         )
 
         severity = payload["severity"]
+
         if hasattr(severity, "value"):
             severity = severity.value
+
+        raw_verification_status = str(
+            payload.get(
+                "verification_status",
+                "PROVISIONAL",
+            )
+        ).strip().upper()
+
+        verification_status_mapping = {
+            "PROVISIONAL": "PROVISIONAL",
+            "UNVERIFIED": "PROVISIONAL",
+            "CONTROL VERIFICATION NEEDED": "PROVISIONAL",
+            "CONTROL VERIFICATION REQUIRED": "PROVISIONAL",
+            "VERIFICATION NEEDED": "PROVISIONAL",
+            "VERIFICATION REQUIRED": "PROVISIONAL",
+            "PENDING": "PROVISIONAL",
+            "NOT VERIFIED": "PROVISIONAL",
+            "REVIEWED": "REVIEWED",
+            "CONFIRMED": "CONFIRMED",
+            "REJECTED": "REJECTED",
+        }
+
+        verification_status = verification_status_mapping.get(
+            raw_verification_status,
+            "PROVISIONAL",
+        )
 
         query = text("""
             INSERT INTO demooc28.hipaa_findings (
@@ -734,15 +762,20 @@ class DiscoveryRepository:
                 :verification_status,
                 :agent_version
             )
-            ON CONFLICT (discovery_run_id, classification_id)
+            ON CONFLICT (
+                discovery_run_id,
+                classification_id
+            )
             DO UPDATE SET
                 severity = EXCLUDED.severity,
                 finding = EXCLUDED.finding,
                 recommendation = EXCLUDED.recommendation,
                 confidence = EXCLUDED.confidence,
-                needs_human_review = EXCLUDED.needs_human_review,
+                needs_human_review =
+                    EXCLUDED.needs_human_review,
                 review_reason = EXCLUDED.review_reason,
-                verification_status = EXCLUDED.verification_status,
+                verification_status =
+                    EXCLUDED.verification_status,
                 agent_version = EXCLUDED.agent_version
             RETURNING finding_id
         """)
@@ -758,17 +791,19 @@ class DiscoveryRepository:
                     "recommendation": payload["recommendation"],
                     "confidence": payload["confidence"],
                     "needs_human_review": payload.get(
-                        "needs_human_review", False
+                        "needs_human_review",
+                        False,
                     ),
-                    "review_reason": payload.get("review_reason"),
-                    "verification_status": payload.get(
-                        "verification_status", "PROVISIONAL"
+                    "review_reason": payload.get(
+                        "review_reason"
                     ),
+                    "verification_status": verification_status,
                     "agent_version": agent_version,
                 },
             ).scalar_one()
 
         return int(finding_id)
+
 
     def save_hipaa_findings(
         self,
