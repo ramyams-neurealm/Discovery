@@ -191,6 +191,7 @@ def list_database_connections(
     for record in records:
         record.pop("credential_reference", None)
         record.pop("password_encrypted", None)
+        record.pop("password_plaintext", None)
 
     return records
 
@@ -214,6 +215,7 @@ def get_database_connection(
 
     record.pop("credential_reference", None)
     record.pop("password_encrypted", None)
+    record.pop("password_plaintext", None)
     return record
 
 
@@ -281,6 +283,7 @@ def update_database_connection(
 
     updated_record.pop("credential_reference", None)
     updated_record.pop("password_encrypted", None)
+    updated_record.pop("password_plaintext", None)
     return updated_record
 
 

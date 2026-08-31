@@ -37,37 +37,111 @@ class DiscoverySupervisor:
 
     def _classify(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
+
         if "COLUMN_CLASSIFICATION" not in state["effective_scopes"]:
             return state
-        self.repository.update_run_status(run_id, "RUNNING", "COLUMN_CLASSIFICATION", 40)
-        self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "RUNNING", "Classifying discovered columns")
-        profiles = state.get("column_profiles", [])
+
+        self.repository.update_run_status(
+            run_id=run_id,
+            status="RUNNING",
+            current_stage="COLUMN_CLASSIFICATION",
+            progress_percentage=40,
+        )
+        self.repository.update_stage(
+            run_id=run_id,
+            stage_name="COLUMN_CLASSIFICATION",
+            stage_status="RUNNING",
+            message="Classifying discovered columns",
+        )
+
+        column_profiles = state.get("column_profiles", [])
+        results = []
+
         try:
-            results = []
-            keys = (
-                "object_id", "column_id", "schema_name", "table_name", "column_name",
-                "data_type", "nullable", "is_primary_key", "is_foreign_key",
-                "neighboring_columns", "masked_samples", "null_percentage", "distinct_count",
+            for profile in column_profiles:
+                payload = {
+                    "object_id": profile["object_id"],
+                    "schema_name": profile["schema_name"],
+                    "table_name": profile["table_name"],
+                    "column_name": profile["column_name"],
+                    "data_type": profile["data_type"],
+                    "nullable": profile.get("nullable"),
+                    "is_primary_key": profile.get(
+                        "is_primary_key", False
+                    ),
+                    "is_foreign_key": profile.get(
+                        "is_foreign_key", False
+                    ),
+                    "neighboring_columns": profile.get(
+                        "neighboring_columns", []
+                    ),
+                    "masked_samples": profile.get(
+                        "masked_samples", []
+                    ),
+                }
+                results.append(
+                    self.classification_agent.classify(payload)
+                )
+
+            column_ids_by_key = {
+                (
+                    profile["schema_name"],
+                    profile["table_name"],
+                    profile["column_name"],
+                ): profile["column_id"]
+                for profile in column_profiles
+            }
+
+            saved_records = self.repository.save_classifications(
+                run_id=run_id,
+                results=results,
+                column_ids_by_key=column_ids_by_key,
             )
-            for profile in profiles:
-                results.append(self.classification_agent.classify({key: profile.get(key) for key in keys}))
-            results = reconcile_linked_identifiers(results, state.get("objects", []))
-            summary = build_classification_summary(state.get("objects", []), profiles, results)
-            ids = {(p["schema_name"], p["table_name"], p["column_name"]): p["column_id"] for p in profiles}
-            saved = self.repository.save_classifications(run_id, results, ids)
-            message = (
-                f"Classified {summary['classified_columns']} of {summary['discovered_columns']} "
-                f"discovered columns; {summary['excluded_columns']} excluded because "
-                "they had no eligible table profile."
+
+            self.repository.update_stage(
+                run_id=run_id,
+                stage_name="COLUMN_CLASSIFICATION",
+                stage_status="COMPLETED",
+                message=f"Classified {len(results)} columns",
+                processed_items=len(results),
+                total_items=len(column_profiles),
             )
-            self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "COMPLETED", message, len(results), summary["eligible_columns"])
-            self.repository.update_run_status(run_id, "RUNNING", "COLUMN_CLASSIFICATION", 60)
-            return {**state, "classifications": results, "classification_records": saved, "classification_summary": summary}
+            self.repository.update_run_status(
+                run_id=run_id,
+                status="RUNNING",
+                current_stage="COLUMN_CLASSIFICATION",
+                progress_percentage=60,
+            )
+
+            return {
+                **state,
+                "classifications": results,
+                "classification_records": saved_records,
+            }
+
         except Exception as error:
-            safe = f"Column classification failed: {error.__class__.__name__}"
-            self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "FAILED", "Column classification failed", error_code="CLASSIFICATION_FAILED", error_message=safe)
-            self.repository.update_run_status(run_id, "FAILED", "COLUMN_CLASSIFICATION", 40, "CLASSIFICATION_FAILED", safe)
+            safe_error = (
+                "Column classification failed: "
+                f"{error.__class__.__name__}"
+            )
+            self.repository.update_stage(
+                run_id=run_id,
+                stage_name="COLUMN_CLASSIFICATION",
+                stage_status="FAILED",
+                message="Column classification failed",
+                error_code="CLASSIFICATION_FAILED",
+                error_message=safe_error,
+            )
+            self.repository.update_run_status(
+                run_id=run_id,
+                status="FAILED",
+                current_stage="COLUMN_CLASSIFICATION",
+                progress_percentage=40,
+                error_code="CLASSIFICATION_FAILED",
+                error_message=safe_error,
+            )
             raise
+
     def _dependencies(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
         if "DEPENDENCY_MAP" not in state["effective_scopes"]:

@@ -4,7 +4,6 @@ from src.agents.base import BaseAgent
 from src.models.llm_client import build_llm
 from src.models.schemas import ClassificationResult, HipaaFinding, HipaaScore
 from src.prompts.hipaa_prompts import HIPAA_SYSTEM_PROMPT
-from src.tools.hipaa_policy import normalize_hipaa_finding
 from src.tools.scoring_tools import calculate_hipaa_score
 
 
@@ -14,7 +13,7 @@ class HipaaFindingBatch(BaseModel):
 
 class HipaaComplianceScoreAgent(BaseAgent):
     def evaluate(self, classifications: list[ClassificationResult]) -> tuple[list[HipaaFinding], HipaaScore]:
-        phi_rows = [row for row in classifications if row.display_classification.value == "PHI"]
+        phi_rows = [r for r in classifications if r.display_classification.value == "PHI"]
         if not phi_rows:
             return [], calculate_hipaa_score([])
         llm = build_llm(self.settings, self.key_vault)
@@ -23,9 +22,9 @@ class HipaaComplianceScoreAgent(BaseAgent):
             ("system", HIPAA_SYSTEM_PROMPT),
             ("human", "Evaluate these PHI classifications:\n{payload}"),
         ])
-        batch = (prompt | structured_llm).invoke({"payload": [row.model_dump(mode="json") for row in phi_rows]})
-        findings = [
-            normalize_hipaa_finding(finding, self.settings.hipaa_confidence_threshold)
-            for finding in batch.findings
-        ]
-        return findings, calculate_hipaa_score(findings)
+        batch = (prompt | structured_llm).invoke({"payload": [r.model_dump() for r in phi_rows]})
+        for finding in batch.findings:
+            if finding.confidence < self.settings.hipaa_confidence_threshold:
+                finding.needs_human_review = True
+                finding.review_reason = finding.review_reason or "Confidence below threshold"
+        return batch.findings, calculate_hipaa_score(batch.findings)

@@ -50,7 +50,12 @@ class DiscoveryRepository:
                 "effective_scopes": json.dumps(effective_scopes),
             })
 
-    def create_run_stages(self, run_id: UUID, effective_scopes: list[str]) -> None:
+    def create_run_stages(
+        self,
+        run_id: UUID,
+        effective_scopes: list[str],
+    ) -> None:
+        """Create all workflow stages and timestamp skipped stages."""
         effective_scope_set = set(effective_scopes)
         stage_scope_mapping = {
             "COLUMN_CLASSIFICATION": "COLUMN_CLASSIFICATION",
@@ -59,27 +64,43 @@ class DiscoveryRepository:
         }
         query = text("""
             INSERT INTO demooc28.discovery_run_stages (
-                discovery_run_id, stage_name, stage_status, message
+                discovery_run_id,
+                stage_name,
+                stage_status,
+                message,
+                completed_at
             ) VALUES (
-                :run_id, :stage_name, :stage_status, :message
+                CAST(:run_id AS UUID),
+                CAST(:stage_name AS VARCHAR(64)),
+                CAST(:stage_status AS VARCHAR(32)),
+                CAST(:message AS TEXT),
+                CASE
+                    WHEN CAST(:is_skipped AS BOOLEAN)
+                    THEN CURRENT_TIMESTAMP
+                    ELSE NULL
+                END
             )
             ON CONFLICT (discovery_run_id, stage_name) DO NOTHING
         """)
         with self.database.connect() as connection:
             for stage_name in DISCOVERY_STAGES:
                 required_scope = stage_scope_mapping.get(stage_name)
-                if required_scope and required_scope not in effective_scope_set:
-                    stage_status = "SKIPPED"
-                    message = "Stage not requested"
-                else:
-                    stage_status = "PENDING"
-                    message = "Waiting to start"
-                connection.execute(query, {
-                    "run_id": str(run_id),
-                    "stage_name": stage_name,
-                    "stage_status": stage_status,
-                    "message": message,
-                })
+                is_skipped = bool(
+                    required_scope
+                    and required_scope not in effective_scope_set
+                )
+                stage_status = "SKIPPED" if is_skipped else "PENDING"
+                message = "Stage not requested" if is_skipped else "Waiting to start"
+                connection.execute(
+                    query,
+                    {
+                        "run_id": str(run_id),
+                        "stage_name": stage_name,
+                        "stage_status": stage_status,
+                        "message": message,
+                        "is_skipped": is_skipped,
+                    },
+                )
 
     def get_run(self, run_id: UUID | str) -> dict[str, Any] | None:
         query = text("""
@@ -741,6 +762,16 @@ class DiscoveryRepository:
 
         if hasattr(severity, "value"):
             severity = severity.value
+
+        if severity in {"NEEDS_REVIEW", "SERIOUS", "CRITICAL"}:
+            payload["needs_human_review"] = True
+            payload["review_reason"] = (
+                payload.get("review_reason")
+                or "Human review is required because applicable controls "
+                   "could not be verified from the supplied metadata."
+            )
+
+        payload["verification_status"] = "PROVISIONAL"
 
         raw_verification_status = str(
             payload.get(

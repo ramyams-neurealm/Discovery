@@ -8,10 +8,13 @@ MAX_SAMPLE_VALUES = 3
 _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
 
 
-def profile_tables(source_connector: Any, objects: list[dict[str, Any]]):
-    """Profile tables through a PostgreSQL, MySQL, SQL Server, or Oracle connector."""
-    table_profiles = []
-    column_profiles = []
+def profile_tables(
+    source_connector: Any,
+    objects: list[dict[str, Any]],
+):
+    """Profile tables and report the exact object when profiling fails."""
+    table_profiles: list[dict[str, Any]] = []
+    column_profiles: list[dict[str, Any]] = []
 
     for database_object in objects:
         if database_object.get("object_type") != "TABLE":
@@ -21,21 +24,47 @@ def profile_tables(source_connector: Any, objects: list[dict[str, Any]]):
         table_name = database_object["object_name"]
         columns = database_object.get("columns", [])
 
-        row_count = _scalar(
-            source_connector,
-            _row_count_query(source_connector, schema_name, table_name),
-        )
-
-        current_profiles = []
-        for column in columns:
-            profile = _profile_column(
-                source_connector=source_connector,
-                schema_name=schema_name,
-                table_name=table_name,
-                row_count=row_count,
-                column=column,
-                all_columns=columns,
+        try:
+            row_count = _scalar(
+                source_connector,
+                _row_count_query(
+                    source_connector,
+                    schema_name,
+                    table_name,
+                ),
             )
+        except Exception as error:
+            raise RuntimeError(
+                "Table row-count profiling failed for "
+                f"{schema_name}.{table_name}. "
+                f"Failure type: {error.__class__.__name__}. "
+                f"Driver message: {error}"
+            ) from error
+
+        current_profiles: list[dict[str, Any]] = []
+
+        for column in columns:
+            try:
+                profile = _profile_column(
+                    source_connector=source_connector,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    row_count=row_count,
+                    column=column,
+                    all_columns=columns,
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    "Column profiling failed for "
+                    f"{schema_name}.{table_name}."
+                    f"{column.get('column_name')}. "
+                    f"Data type: {column.get('data_type')}. "
+                    "Native data type: "
+                    f"{column.get('native_data_type')}. "
+                    f"Failure type: {error.__class__.__name__}. "
+                    f"Driver message: {error}"
+                ) from error
+
             current_profiles.append(profile)
             column_profiles.append(profile)
 
@@ -77,30 +106,33 @@ def _profile_column(
     all_columns: list[dict[str, Any]],
 ):
     column_name = column["column_name"]
-    table_ref = _table_reference(source_connector, schema_name, table_name)
+    table_ref = _table_reference(
+        source_connector,
+        schema_name,
+        table_name,
+    )
     column_ref = _quote_identifier(source_connector, column_name)
-    distinct_column_ref = _distinct_expression(
+    comparable_expression = _distinct_expression(
         source_connector=source_connector,
         column=column,
         column_ref=column_ref,
     )
+
     null_count = _scalar(
         source_connector,
-        f"SELECT COUNT(*) FROM {table_ref} WHERE {column_ref} IS NULL",
+        f"SELECT COUNT(*) FROM {table_ref} "
+        f"WHERE {column_ref} IS NULL",
     )
     distinct_count = _scalar(
         source_connector,
-        (
-            f"SELECT COUNT(DISTINCT {distinct_column_ref}) "
-            f"FROM {table_ref} "
-            f"WHERE {column_ref} IS NOT NULL"
-        ),
+        f"SELECT COUNT(DISTINCT {comparable_expression}) "
+        f"FROM {table_ref} WHERE {column_ref} IS NOT NULL",
     )
     raw_samples = _sample_values(
         source_connector=source_connector,
         table_ref=table_ref,
         column_ref=column_ref,
-        sample_expression=distinct_column_ref,
+        sample_expression=comparable_expression,
     )
 
     null_percentage = (
@@ -133,36 +165,53 @@ def _profile_column(
     }
 
 
-def _row_count_query(source_connector: Any, schema_name: str, table_name: str):
-    return f"SELECT COUNT(*) FROM {_table_reference(source_connector, schema_name, table_name)}"
+def _row_count_query(
+    source_connector: Any,
+    schema_name: str,
+    table_name: str,
+):
+    table_ref = _table_reference(
+        source_connector,
+        schema_name,
+        table_name,
+    )
+    return f"SELECT COUNT(*) FROM {table_ref}"
+
 
 def _distinct_expression(
     source_connector: Any,
     column: dict[str, Any],
     column_ref: str,
 ) -> str:
-    """
-    Return a SQL expression that supports DISTINCT operations.
-
-    PostgreSQL JSON has no equality operator, so JSON values are
-    converted to text for distinct counting and sample selection.
-    """
-
+    """Convert non-comparable source types before DISTINCT operations."""
     vendor = _vendor(source_connector)
-
     native_data_type = str(
         column.get("native_data_type")
         or column.get("data_type")
         or ""
     ).strip().lower()
+    base_data_type = native_data_type.split("(", 1)[0].strip()
 
-    if (
-        vendor == "POSTGRESQL"
-        and native_data_type == "json"
-    ):
+    if vendor == "POSTGRESQL" and base_data_type == "json":
         return f"CAST({column_ref} AS TEXT)"
 
+    if vendor == "SQL_SERVER":
+        if base_data_type in {
+            "text",
+            "ntext",
+            "xml",
+            "geography",
+            "geometry",
+            "hierarchyid",
+            "sql_variant",
+        }:
+            return f"CONVERT(NVARCHAR(4000), {column_ref})"
+
+        if base_data_type == "image":
+            return f"CONVERT(VARCHAR(8000), {column_ref}, 1)"
+
     return column_ref
+
 
 def _sample_values(
     source_connector: Any,
@@ -170,41 +219,29 @@ def _sample_values(
     column_ref: str,
     sample_expression: str,
 ):
-    """
-    Return distinct non-null sample values.
-
-    sample_expression may differ from column_ref for source types
-    that do not support equality, such as PostgreSQL JSON.
-    """
-
+    """Return distinct non-null sample values."""
     vendor = _vendor(source_connector)
 
     if vendor == "SQL_SERVER":
         query = (
             f"SELECT DISTINCT TOP {MAX_SAMPLE_VALUES} "
-            f"{sample_expression} "
-            f"FROM {table_ref} "
+            f"{sample_expression} FROM {table_ref} "
             f"WHERE {column_ref} IS NOT NULL"
         )
-
     elif vendor == "ORACLE":
         query = (
-            f"SELECT DISTINCT {sample_expression} "
-            f"FROM {table_ref} "
+            f"SELECT DISTINCT {sample_expression} FROM {table_ref} "
             f"WHERE {column_ref} IS NOT NULL "
             f"FETCH FIRST {MAX_SAMPLE_VALUES} ROWS ONLY"
         )
-
     else:
         query = (
-            f"SELECT DISTINCT {sample_expression} "
-            f"FROM {table_ref} "
+            f"SELECT DISTINCT {sample_expression} FROM {table_ref} "
             f"WHERE {column_ref} IS NOT NULL "
             f"LIMIT {MAX_SAMPLE_VALUES}"
         )
 
     cursor = source_connector.connection.cursor()
-
     try:
         cursor.execute(query)
         rows = cursor.fetchall()
@@ -238,7 +275,11 @@ def _vendor(source_connector: Any):
     return vendor
 
 
-def _table_reference(source_connector: Any, schema_name: str, table_name: str):
+def _table_reference(
+    source_connector: Any,
+    schema_name: str,
+    table_name: str,
+):
     return (
         f"{_quote_identifier(source_connector, schema_name)}."
         f"{_quote_identifier(source_connector, table_name)}"
@@ -249,16 +290,13 @@ def _quote_identifier(source_connector: Any, identifier: str):
     """Quote a database identifier safely, including names with spaces."""
     if not isinstance(identifier, str) or not identifier:
         raise ValueError("Database identifier must be a non-empty string")
-
     if "\x00" in identifier:
         raise ValueError("Database identifier contains a null character")
 
     vendor = _vendor(source_connector)
-
     if vendor == "MYSQL":
         escaped = identifier.replace("`", "``")
         return f"`{escaped}`"
-
     if vendor == "SQL_SERVER":
         escaped = identifier.replace("]", "]]" )
         return f"[{escaped}]"

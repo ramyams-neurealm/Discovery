@@ -3,7 +3,6 @@ from src.agents.base import BaseAgent
 from src.models.llm_client import build_llm
 from src.models.schemas import ClassificationResult
 from src.prompts.classification_prompts import CLASSIFICATION_SYSTEM_PROMPT
-from src.tools.classification_policy import normalize_classification
 
 
 class DataClassificationAgent(BaseAgent):
@@ -15,8 +14,7 @@ class DataClassificationAgent(BaseAgent):
             ("human", "Classify this column context:\n{payload}"),
         ])
         result = (prompt | structured_llm).invoke({"payload": column_payload})
-        return normalize_classification(
-            result,
-            column_payload,
-            self.settings.classification_confidence_threshold,
-        )
+        if result.confidence < self.settings.classification_confidence_threshold:
+            result.needs_human_review = True
+            result.review_reason = result.review_reason or "Confidence below threshold"
+        return result
