@@ -43,10 +43,13 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
 
     def discover_metadata(self) -> list[dict[str, Any]]:
-        """Discover tables, views, procedures, functions, columns, PKs, FKs and DDL."""
+        """Discover all supported MySQL database objects."""
         database_name = self.config["database_name"]
+
         objects = self._discover_tables_and_views(database_name)
         objects.extend(self._discover_routines(database_name))
+        objects.extend(self._discover_triggers(database_name))
+
         return objects
 
     def _discover_tables_and_views(self, database_name: str):
@@ -184,6 +187,95 @@ class MySQLConnector(DatabaseConnector):
             )
 
         return routines
+    
+    def _discover_triggers(
+        self,
+        database_name: str,
+    ) -> list[dict[str, Any]]:
+        """Discover user-defined MySQL triggers."""
+
+        query = """
+            SELECT
+                TRIGGER_SCHEMA,
+                TRIGGER_NAME,
+                EVENT_MANIPULATION,
+                EVENT_OBJECT_SCHEMA,
+                EVENT_OBJECT_TABLE,
+                ACTION_ORDER,
+                ACTION_CONDITION,
+                ACTION_STATEMENT,
+                ACTION_ORIENTATION,
+                ACTION_TIMING,
+                CREATED,
+                SQL_MODE,
+                DEFINER
+            FROM information_schema.TRIGGERS
+            WHERE TRIGGER_SCHEMA = %s
+            ORDER BY TRIGGER_NAME
+        """
+
+        cursor = self.connection.cursor()
+
+        try:
+            cursor.execute(query, (database_name,))
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        triggers = []
+
+        for row in rows:
+            (
+                trigger_schema,
+                trigger_name,
+                event_manipulation,
+                event_object_schema,
+                event_object_table,
+                action_order,
+                action_condition,
+                action_statement,
+                action_orientation,
+                action_timing,
+                created_at,
+                sql_mode,
+                definer,
+            ) = row
+
+            trigger_ddl = self._get_trigger_ddl(
+                schema_name=trigger_schema,
+                trigger_name=trigger_name,
+                fallback_statement=action_statement,
+            )
+
+            trigger = new_object(
+                schema_name=trigger_schema,
+                object_name=trigger_name,
+                object_type="TRIGGER",
+                object_ddl=trigger_ddl,
+                metadata={
+                    "language": "SQL",
+                    "parameter_count": 0,
+                    "last_altered_at": created_at,
+                    "return_type": None,
+                    "materialized": False,
+                    "enabled": True,
+                    "trigger_table_schema": event_object_schema,
+                    "trigger_table": event_object_table,
+                    "trigger_timing": action_timing,
+                    "trigger_events": [
+                        event_manipulation
+                    ],
+                    "orientation": action_orientation,
+                    "action_order": action_order,
+                    "action_condition": action_condition,
+                    "sql_mode": sql_mode,
+                    "definer": definer,
+                },
+            )
+
+            triggers.append(trigger)
+
+        return triggers
 
     def _columns(self, schema_name: str, object_name: str):
         query = """
@@ -336,6 +428,42 @@ class MySQLConnector(DatabaseConnector):
             if isinstance(value, str) and "CREATE" in value.upper():
                 return value
         return None
+    
+    def _get_trigger_ddl(
+        self,
+        schema_name: str,
+        trigger_name: str,
+        fallback_statement: str | None = None,
+    ) -> str | None:
+        """Return the complete trigger definition when permitted."""
+
+        query = (
+            "SHOW CREATE TRIGGER "
+            f"{self._quote(schema_name)}."
+            f"{self._quote(trigger_name)}"
+        )
+
+        cursor = self.connection.cursor()
+
+        try:
+            cursor.execute(query)
+            row = cursor.fetchone()
+        except Exception:
+            return fallback_statement
+        finally:
+            cursor.close()
+
+        if not row:
+            return fallback_statement
+
+        for value in row[1:]:
+            if (
+                isinstance(value, str)
+                and "TRIGGER" in value.upper()
+            ):
+                return value
+
+        return fallback_statement
 
     @staticmethod
     def _quote(identifier: str) -> str:

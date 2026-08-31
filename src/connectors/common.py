@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from src.connectors.object_metadata import normalize_object_metadata
 from typing import Any
 
 
@@ -20,12 +20,18 @@ def new_object(
     object_ddl: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_metadata = normalize_object_metadata(
+        metadata=metadata,
+        object_ddl=object_ddl,
+        object_type=object_type,
+    )
+
     return {
         "schema_name": schema_name,
         "object_name": object_name,
         "object_type": object_type,
         "object_ddl": object_ddl,
-        "object_metadata": metadata or {},
+        "object_metadata": normalized_metadata,
         "columns": [],
         "primary_key_columns": [],
         "foreign_keys": [],
