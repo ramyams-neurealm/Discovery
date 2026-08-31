@@ -4,7 +4,7 @@ from typing import Any
 
 from src.connectors.base import DatabaseConnector
 from src.connectors.common import apply_key_flags, new_column, new_object
-
+from src.connectors.object_metadata import normalize_object_metadata
 
 class SQLServerConnector(DatabaseConnector):
     """SQL Server connector supporting modern and legacy ODBC drivers."""
@@ -115,60 +115,335 @@ class SQLServerConnector(DatabaseConnector):
             cursor.close()
 
     def discover_metadata(self) -> list[dict[str, Any]]:
-        """Discover tables and views with columns and key metadata."""
+        """Discover SQL Server tables, views, and triggers."""
+
         schema_filter = self.config.get("schema_name")
+
         query = """
-            SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
+            SELECT
+                TABLE_SCHEMA,
+                TABLE_NAME,
+                TABLE_TYPE
             FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+            WHERE TABLE_TYPE IN (
+                'BASE TABLE',
+                'VIEW'
+            )
         """
+
         parameters: list[Any] = []
 
         if schema_filter:
             query += " AND TABLE_SCHEMA = ?"
             parameters.append(schema_filter)
 
-        query += " ORDER BY TABLE_SCHEMA, TABLE_NAME"
+        query += """
+            ORDER BY
+                TABLE_SCHEMA,
+                TABLE_NAME
+        """
 
         cursor = self.connection.cursor()
+
         try:
             if parameters:
                 cursor.execute(query, *parameters)
             else:
                 cursor.execute(query)
+
             rows = cursor.fetchall()
         finally:
             cursor.close()
 
         objects: list[dict[str, Any]] = []
+
         for row in rows:
             schema_name = str(row[0])
             object_name = str(row[1])
             table_type = str(row[2])
-            object_type = "TABLE" if table_type == "BASE TABLE" else "VIEW"
+
+            object_type = (
+                "TABLE"
+                if table_type == "BASE TABLE"
+                else "VIEW"
+            )
+
+            object_ddl = None
+
+            if object_type == "VIEW":
+                object_ddl = self._get_module_definition(
+                    schema_name=schema_name,
+                    object_name=object_name,
+                )
 
             item = new_object(
+                schema_name=schema_name,
+                object_name=object_name,
+                object_type=object_type,
+                object_ddl=object_ddl,
+                metadata={
+                    "source_table_type": table_type,
+                    "language": (
+                        "TSQL"
+                        if object_type == "VIEW"
+                        else None
+                    ),
+                    "materialized": False,
+                    "enabled": True,
+                },
+            )
+
+            item["columns"] = self._columns(
                 schema_name,
                 object_name,
-                object_type,
-                metadata={"source_table_type": table_type},
             )
-            item["columns"] = self._columns(schema_name, object_name)
 
             if object_type == "TABLE":
-                item["primary_key_columns"] = self._primary_keys(
-                    schema_name,
-                    object_name,
+                item["primary_key_columns"] = (
+                    self._primary_keys(
+                        schema_name,
+                        object_name,
+                    )
                 )
-                item["foreign_keys"] = self._foreign_keys(
-                    schema_name,
-                    object_name,
+
+                item["foreign_keys"] = (
+                    self._foreign_keys(
+                        schema_name,
+                        object_name,
+                    )
                 )
+
                 apply_key_flags(item)
+
+            item["object_metadata"] = (
+                normalize_object_metadata(
+                    metadata=item.get(
+                        "object_metadata"
+                    ),
+                    object_ddl=item.get(
+                        "object_ddl"
+                    ),
+                    object_type=object_type,
+                    column_count=len(
+                        item.get("columns", [])
+                    ),
+                    foreign_key_count=len(
+                        item.get("foreign_keys", [])
+                    ),
+                )
+            )
 
             objects.append(item)
 
+        objects.extend(
+            self._discover_triggers(
+                schema_filter=schema_filter,
+            )
+        )
+
         return objects
+
+    def _discover_triggers(
+        self,
+        schema_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Discover table-level SQL Server DML triggers."""
+
+        query = """
+            SELECT
+                trigger_info.object_id,
+                trigger_schema.name AS trigger_schema,
+                trigger_info.name AS trigger_name,
+                table_schema.name AS table_schema,
+                table_info.name AS table_name,
+                module_info.definition AS trigger_ddl,
+                trigger_info.is_disabled,
+                trigger_info.is_instead_of_trigger,
+                trigger_object.create_date,
+                trigger_object.modify_date
+            FROM sys.triggers AS trigger_info
+
+            JOIN sys.objects AS trigger_object
+              ON trigger_object.object_id =
+                 trigger_info.object_id
+
+            JOIN sys.schemas AS trigger_schema
+              ON trigger_schema.schema_id =
+                 trigger_object.schema_id
+
+            JOIN sys.tables AS table_info
+              ON table_info.object_id =
+                 trigger_info.parent_id
+
+            JOIN sys.schemas AS table_schema
+              ON table_schema.schema_id =
+                 table_info.schema_id
+
+            LEFT JOIN sys.sql_modules AS module_info
+              ON module_info.object_id =
+                 trigger_info.object_id
+
+            WHERE trigger_info.parent_class = 1
+        """
+
+        parameters: list[Any] = []
+
+        if schema_filter:
+            query += """
+              AND table_schema.name = ?
+            """
+            parameters.append(schema_filter)
+
+        query += """
+            ORDER BY
+                trigger_schema.name,
+                trigger_info.name
+        """
+
+        cursor = self.connection.cursor()
+
+        try:
+            if parameters:
+                cursor.execute(query, *parameters)
+            else:
+                cursor.execute(query)
+
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        triggers: list[dict[str, Any]] = []
+
+        for row in rows:
+            trigger_object_id = int(row[0])
+            trigger_schema = str(row[1])
+            trigger_name = str(row[2])
+            table_schema = str(row[3])
+            table_name = str(row[4])
+
+            trigger_ddl = (
+                str(row[5])
+                if row[5] is not None
+                else None
+            )
+
+            is_disabled = bool(row[6])
+            is_instead_of = bool(row[7])
+            created_at = row[8]
+            modified_at = row[9]
+
+            trigger_events = self._trigger_events(
+                trigger_object_id
+            )
+
+            trigger_timing = (
+                "INSTEAD OF"
+                if is_instead_of
+                else "AFTER"
+            )
+
+            trigger = new_object(
+                schema_name=trigger_schema,
+                object_name=trigger_name,
+                object_type="TRIGGER",
+                object_ddl=trigger_ddl,
+                metadata={
+                    "language": "TSQL",
+                    "parameter_count": 0,
+                    "created_at": created_at,
+                    "last_altered_at": modified_at,
+                    "return_type": None,
+                    "materialized": False,
+                    "enabled": not is_disabled,
+                    "is_disabled": is_disabled,
+                    "instead_of": is_instead_of,
+                    "trigger_table_schema": table_schema,
+                    "trigger_table": table_name,
+                    "trigger_timing": trigger_timing,
+                    "trigger_events": trigger_events,
+                    "orientation": "STATEMENT",
+                },
+            )
+
+            triggers.append(trigger)
+
+        return triggers
+    
+    def _trigger_events(
+        self,
+        trigger_object_id: int,
+    ) -> list:
+        """Return INSERT, UPDATE, or DELETE events for a trigger."""
+
+        query = """
+            SELECT type_desc
+            FROM sys.trigger_events
+            WHERE object_id = ?
+            ORDER BY type_desc
+        """
+
+        cursor = self.connection.cursor()
+
+        try:
+            cursor.execute(
+                query,
+                trigger_object_id,
+            )
+
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        events: list[str] = []
+
+        for row in rows:
+            event_name = str(row[0]).strip().upper()
+
+            if event_name and event_name not in events:
+                events.append(event_name)
+
+        return events
+    
+    def _get_module_definition(
+        self,
+        schema_name: str,
+        object_name: str,
+    ) -> str | None:
+        """Return the SQL definition for a SQL Server module."""
+
+        query = """
+            SELECT module_info.definition
+            FROM sys.sql_modules AS module_info
+
+            JOIN sys.objects AS object_info
+              ON object_info.object_id =
+                 module_info.object_id
+
+            JOIN sys.schemas AS schema_info
+              ON schema_info.schema_id =
+                 object_info.schema_id
+
+            WHERE schema_info.name = ?
+              AND object_info.name = ?
+        """
+
+        cursor = self.connection.cursor()
+
+        try:
+            cursor.execute(
+                query,
+                schema_name,
+                object_name,
+            )
+
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+
+        if row is None or row[0] is None:
+            return None
+
+        return str(row[0])
 
     def _columns(
         self,

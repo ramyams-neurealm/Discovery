@@ -125,6 +125,7 @@ class DiscoveryRepository:
                 host,
                 port,
                 database_name,
+                schema_name,
                 username,
                 ssl_enabled,
                 is_active,
@@ -157,6 +158,7 @@ class DiscoveryRepository:
                 datasource.host,
                 datasource.port,
                 datasource.database_name,
+                datasource.schema_name,
                 datasource.username,
                 datasource.ssl_enabled,
                 datasource.is_active,
@@ -1059,7 +1061,7 @@ class DiscoveryRepository:
     def list_datasource_connections(self) -> list[dict[str, Any]]:
         query = text("""
             SELECT connection_id, connection_name, database_type, host, port,
-                   database_name, username, ssl_enabled, is_active,
+                   database_name, schema_name, username, ssl_enabled, is_active,
                    discovery_status, last_discovered_at, created_at, updated_at
             FROM demooc28.datasource_connections
             ORDER BY created_at DESC
