@@ -115,32 +115,99 @@ class SQLServerConnector(DatabaseConnector):
             cursor.close()
 
     def discover_metadata(self) -> list[dict[str, Any]]:
-        """Discover SQL Server tables, views, and triggers."""
+        """
+        Discover SQL Server tables, views, procedures,
+        functions, and triggers.
+        """
 
         schema_filter = self.config.get("schema_name")
 
+        objects = self._discover_tables_and_views(
+            schema_filter=schema_filter,
+        )
+
+        objects.extend(
+            self._discover_routines(
+                schema_filter=schema_filter,
+            )
+        )
+
+        objects.extend(
+            self._discover_triggers(
+                schema_filter=schema_filter,
+            )
+        )
+
+        return objects
+
+    def _discover_tables_and_views(
+        self,
+        schema_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Discover SQL Server tables and views with rich metadata."""
+
         query = """
             SELECT
-                TABLE_SCHEMA,
-                TABLE_NAME,
-                TABLE_TYPE
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE IN (
-                'BASE TABLE',
-                'VIEW'
+                schema_info.name AS schema_name,
+                object_info.name AS object_name,
+                object_info.type AS object_type_code,
+                object_info.type_desc AS source_object_type,
+                object_info.create_date,
+                object_info.modify_date,
+                module_info.definition,
+                CAST(
+                    ISNULL(
+                        table_size.estimated_size_bytes,
+                        0
+                    ) AS BIGINT
+                ) AS estimated_size_bytes
+            FROM sys.objects AS object_info
+
+            JOIN sys.schemas AS schema_info
+              ON schema_info.schema_id =
+                 object_info.schema_id
+
+            LEFT JOIN sys.sql_modules AS module_info
+              ON module_info.object_id =
+                 object_info.object_id
+
+            LEFT JOIN (
+                SELECT
+                    partition_info.object_id,
+                    SUM(
+                        allocation_info.total_pages
+                    ) * 8192 AS estimated_size_bytes
+                FROM sys.partitions AS partition_info
+
+                JOIN sys.allocation_units AS allocation_info
+                  ON allocation_info.container_id =
+                     partition_info.hobt_id
+
+                GROUP BY
+                    partition_info.object_id
+            ) AS table_size
+              ON table_size.object_id =
+                 object_info.object_id
+
+            WHERE object_info.type IN (
+                'U',
+                'V'
             )
+              AND object_info.is_ms_shipped = 0
         """
 
         parameters: list[Any] = []
 
         if schema_filter:
-            query += " AND TABLE_SCHEMA = ?"
+            query += """
+              AND schema_info.name = ?
+            """
             parameters.append(schema_filter)
 
         query += """
             ORDER BY
-                TABLE_SCHEMA,
-                TABLE_NAME
+                schema_info.name,
+                object_info.name
         """
 
         cursor = self.connection.cursor()
@@ -160,21 +227,26 @@ class SQLServerConnector(DatabaseConnector):
         for row in rows:
             schema_name = str(row[0])
             object_name = str(row[1])
-            table_type = str(row[2])
+            object_type_code = str(row[2])
+            source_object_type = str(row[3])
+            created_at = row[4]
+            last_altered_at = row[5]
+
+            object_ddl = (
+                str(row[6])
+                if row[6] is not None
+                else None
+            )
+
+            estimated_size_bytes = int(
+                row[7] or 0
+            )
 
             object_type = (
                 "TABLE"
-                if table_type == "BASE TABLE"
+                if object_type_code == "U"
                 else "VIEW"
             )
-
-            object_ddl = None
-
-            if object_type == "VIEW":
-                object_ddl = self._get_module_definition(
-                    schema_name=schema_name,
-                    object_name=object_name,
-                )
 
             item = new_object(
                 schema_name=schema_name,
@@ -182,11 +254,18 @@ class SQLServerConnector(DatabaseConnector):
                 object_type=object_type,
                 object_ddl=object_ddl,
                 metadata={
-                    "source_table_type": table_type,
+                    "source_object_type": source_object_type,
                     "language": (
                         "TSQL"
                         if object_type == "VIEW"
                         else None
+                    ),
+                    "parameter_count": 0,
+                    "return_type": None,
+                    "created_at": created_at,
+                    "last_altered_at": last_altered_at,
+                    "estimated_size_bytes": (
+                        estimated_size_bytes
                     ),
                     "materialized": False,
                     "enabled": True,
@@ -235,13 +314,173 @@ class SQLServerConnector(DatabaseConnector):
 
             objects.append(item)
 
-        objects.extend(
-            self._discover_triggers(
-                schema_filter=schema_filter,
-            )
-        )
-
         return objects
+
+    def _discover_routines(
+        self,
+        schema_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Discover SQL Server procedures and functions
+        with rich metadata.
+        """
+
+        query = """
+            SELECT
+                schema_info.name AS schema_name,
+                object_info.name AS routine_name,
+                object_info.type AS routine_type_code,
+                object_info.type_desc AS source_object_type,
+                object_info.create_date,
+                object_info.modify_date,
+                module_info.definition,
+                module_info.execute_as_principal_id,
+                module_info.uses_ansi_nulls,
+                module_info.uses_quoted_identifier,
+                module_info.is_schema_bound,
+                module_info.null_on_null_input,
+                module_info.is_recompiled,
+                (
+                    SELECT COUNT(*)
+                    FROM sys.parameters AS parameter_info
+                    WHERE parameter_info.object_id =
+                          object_info.object_id
+                      AND parameter_info.parameter_id > 0
+                ) AS parameter_count,
+                return_type_info.name AS return_type
+            FROM sys.objects AS object_info
+
+            JOIN sys.schemas AS schema_info
+              ON schema_info.schema_id =
+                 object_info.schema_id
+
+            LEFT JOIN sys.sql_modules AS module_info
+              ON module_info.object_id =
+                 object_info.object_id
+
+            LEFT JOIN sys.parameters AS return_parameter
+              ON return_parameter.object_id =
+                 object_info.object_id
+             AND return_parameter.parameter_id = 0
+
+            LEFT JOIN sys.types AS return_type_info
+              ON return_type_info.user_type_id =
+                 return_parameter.user_type_id
+
+            WHERE object_info.type IN (
+                'P',
+                'PC',
+                'FN',
+                'IF',
+                'TF',
+                'FS',
+                'FT'
+            )
+              AND object_info.is_ms_shipped = 0
+        """
+
+        parameters: list[Any] = []
+
+        if schema_filter:
+            query += """
+              AND schema_info.name = ?
+            """
+            parameters.append(schema_filter)
+
+        query += """
+            ORDER BY
+                schema_info.name,
+                object_info.name
+        """
+
+        cursor = self.connection.cursor()
+
+        try:
+            if parameters:
+                cursor.execute(query, *parameters)
+            else:
+                cursor.execute(query)
+
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+
+        routines: list[dict[str, Any]] = []
+
+        procedure_types = {
+            "P",
+            "PC",
+        }
+
+        for row in rows:
+            schema_name = str(row[0])
+            routine_name = str(row[1])
+            routine_type_code = str(row[2])
+            source_object_type = str(row[3])
+            created_at = row[4]
+            last_altered_at = row[5]
+
+            routine_ddl = (
+                str(row[6])
+                if row[6] is not None
+                else None
+            )
+
+            execute_as_principal_id = row[7]
+            uses_ansi_nulls = bool(row[8])
+            uses_quoted_identifier = bool(row[9])
+            is_schema_bound = bool(row[10])
+            null_on_null_input = bool(row[11])
+            is_recompiled = bool(row[12])
+            parameter_count = int(row[13] or 0)
+
+            object_type = (
+                "PROCEDURE"
+                if routine_type_code in procedure_types
+                else "FUNCTION"
+            )
+
+            return_type = None
+
+            if (
+                object_type == "FUNCTION"
+                and row[14] is not None
+            ):
+                return_type = str(row[14])
+
+            routine = new_object(
+                schema_name=schema_name,
+                object_name=routine_name,
+                object_type=object_type,
+                object_ddl=routine_ddl,
+                metadata={
+                    "language": "TSQL",
+                    "parameter_count": parameter_count,
+                    "return_type": return_type,
+                    "created_at": created_at,
+                    "last_altered_at": last_altered_at,
+                    "materialized": False,
+                    "enabled": True,
+                    "source_object_type": source_object_type,
+                    "routine_type_code": routine_type_code,
+                    "execute_as_principal_id": (
+                        execute_as_principal_id
+                    ),
+                    "uses_ansi_nulls": uses_ansi_nulls,
+                    "uses_quoted_identifier": (
+                        uses_quoted_identifier
+                    ),
+                    "is_schema_bound": is_schema_bound,
+                    "null_on_null_input": (
+                        null_on_null_input
+                    ),
+                    "is_recompiled": is_recompiled,
+                },
+            )
+
+            routines.append(routine)
+
+        return routines
 
     def _discover_triggers(
         self,

@@ -38,41 +38,193 @@ class PostgreSQLConnector(DatabaseConnector):
             return cursor.fetchone()
 
     def discover_metadata(self) -> list[dict[str, Any]]:
-        schema_filter = self.config.get("schema_name")
-        query = """
-            SELECT table_schema, table_name, table_type
-            FROM information_schema.tables
-            WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-              AND table_schema NOT LIKE 'pg_temp_%%'
-              AND table_schema NOT LIKE 'pg_toast_temp_%%'
-              AND table_type IN ('BASE TABLE', 'VIEW')
         """
-        params: list[Any] = []
+        Discover PostgreSQL tables, views, materialized views,
+        procedures, functions, and triggers.
+        """
+
+        schema_filter = self.config.get("schema_name")
+
+        objects = self._discover_tables_and_views(
+            schema_filter=schema_filter,
+        )
+
+        objects.extend(
+            self._discover_routines(
+                schema_filter=schema_filter,
+            )
+        )
+
+        objects.extend(
+            self._discover_triggers(
+                schema_filter=schema_filter,
+            )
+        )
+
+        return objects
+
+    def _discover_tables_and_views(
+        self,
+        schema_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Discover PostgreSQL tables, views, and materialized views.
+        """
+
+        query = """
+            SELECT
+                namespace_info.nspname AS schema_name,
+                relation_info.relname AS object_name,
+                relation_info.relkind AS relation_kind,
+                relation_info.reltuples::BIGINT
+                    AS estimated_rows,
+                pg_total_relation_size(
+                    relation_info.oid
+                ) AS estimated_size_bytes,
+                obj_description(
+                    relation_info.oid,
+                    'pg_class'
+                ) AS object_comment
+            FROM pg_class AS relation_info
+
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid =
+                 relation_info.relnamespace
+
+            WHERE relation_info.relkind IN (
+                'r',
+                'p',
+                'v',
+                'm'
+            )
+              AND namespace_info.nspname NOT IN (
+                  'information_schema',
+                  'pg_catalog',
+                  'pg_toast'
+              )
+              AND namespace_info.nspname
+                  NOT LIKE 'pg_temp_%%'
+              AND namespace_info.nspname
+                  NOT LIKE 'pg_toast_temp_%%'
+        """
+
+        parameters: list[Any] = []
+
         if schema_filter:
-            query += " AND table_schema = %s"
-            params.append(schema_filter)
-        query += " ORDER BY table_schema, table_name "
+            query += """
+              AND namespace_info.nspname = %s
+            """
+            parameters.append(schema_filter)
+
+        query += """
+            ORDER BY
+                namespace_info.nspname,
+                relation_info.relname
+        """
 
         with self.connection.cursor() as cursor:
-            cursor.execute(query, params)
+            cursor.execute(query, parameters)
             rows = cursor.fetchall()
 
-        objects = []
-        for schema_name, object_name, table_type in rows:
-            object_type = "TABLE" if table_type == "BASE TABLE" else "VIEW"
+        objects: list[dict[str, Any]] = []
+
+        relation_type_mapping = {
+            "r": "TABLE",
+            "p": "TABLE",
+            "v": "VIEW",
+            "m": "MATERIALIZED_VIEW",
+        }
+
+        source_type_mapping = {
+            "r": "BASE TABLE",
+            "p": "PARTITIONED TABLE",
+            "v": "VIEW",
+            "m": "MATERIALIZED VIEW",
+        }
+
+        for row in rows:
+            schema_name = str(row[0])
+            object_name = str(row[1])
+            relation_kind = str(row[2])
+            estimated_rows = row[3]
+            estimated_size_bytes = row[4]
+            object_comment = row[5]
+
+            object_type = relation_type_mapping[
+                relation_kind
+            ]
+
+            object_ddl = self._relation_definition(
+                schema_name=schema_name,
+                object_name=object_name,
+                object_type=object_type,
+            )
+
             item = new_object(
+                schema_name=schema_name,
+                object_name=object_name,
+                object_type=object_type,
+                object_ddl=object_ddl,
+                metadata={
+                    "source_table_type": (
+                        source_type_mapping[
+                            relation_kind
+                        ]
+                    ),
+                    "language": (
+                        "SQL"
+                        if object_type in {
+                            "VIEW",
+                            "MATERIALIZED_VIEW",
+                        }
+                        else None
+                    ),
+                    "parameter_count": 0,
+                    "return_type": None,
+                    "materialized": (
+                        object_type
+                        == "MATERIALIZED_VIEW"
+                    ),
+                    "enabled": True,
+                    "estimated_rows": (
+                        int(estimated_rows or 0)
+                    ),
+                    "estimated_size_bytes": (
+                        int(
+                            estimated_size_bytes or 0
+                        )
+                    ),
+                    "comment": (
+                        str(object_comment)
+                        if object_comment
+                        else None
+                    ),
+                },
+            )
+
+            item["columns"] = self._columns(
                 schema_name,
                 object_name,
-                object_type,
-                metadata={"source_table_type": table_type},
             )
-            item["columns"] = self._columns(schema_name, object_name)
+
             if object_type == "TABLE":
-                item["primary_key_columns"] = self._primary_keys(schema_name, object_name)
-                item["foreign_keys"] = self._foreign_keys(schema_name, object_name)
+                item["primary_key_columns"] = (
+                    self._primary_keys(
+                        schema_name,
+                        object_name,
+                    )
+                )
+
+                item["foreign_keys"] = (
+                    self._foreign_keys(
+                        schema_name,
+                        object_name,
+                    )
+                )
+
                 apply_key_flags(item)
 
-                item["object_metadata"] = (
+            item["object_metadata"] = (
                 normalize_object_metadata(
                     metadata=item.get(
                         "object_metadata"
@@ -89,14 +241,276 @@ class PostgreSQLConnector(DatabaseConnector):
                     ),
                 )
             )
+
             objects.append(item)
-        objects.extend(
-            self._discover_triggers(
-                schema_filter=schema_filter,
-            )
-        )
 
         return objects
+    
+
+    def _relation_definition(
+        self,
+        schema_name: str,
+        object_name: str,
+        object_type: str,
+    ) -> str | None:
+        """
+        Return a PostgreSQL view or materialized-view definition.
+
+        PostgreSQL does not expose a complete CREATE TABLE statement
+        through one simple built-in catalog function, so table DDL
+        remains unavailable here.
+        """
+
+        if object_type not in {
+            "VIEW",
+            "MATERIALIZED_VIEW",
+        }:
+            return None
+
+        query = """
+            SELECT pg_get_viewdef(
+                relation_info.oid,
+                TRUE
+            )
+            FROM pg_class AS relation_info
+
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid =
+                 relation_info.relnamespace
+
+            WHERE namespace_info.nspname = %s
+              AND relation_info.relname = %s
+        """
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                query,
+                (
+                    schema_name,
+                    object_name,
+                ),
+            )
+            row = cursor.fetchone()
+
+        if not row or row[0] is None:
+            return None
+
+        definition = str(row[0]).strip()
+
+        if not definition:
+            return None
+
+        quoted_schema = self._quote_identifier(
+            schema_name
+        )
+        quoted_object = self._quote_identifier(
+            object_name
+        )
+
+        if object_type == "MATERIALIZED_VIEW":
+            prefix = (
+                "CREATE MATERIALIZED VIEW "
+                f"{quoted_schema}.{quoted_object} AS\n"
+            )
+        else:
+            prefix = (
+                "CREATE VIEW "
+                f"{quoted_schema}.{quoted_object} AS\n"
+            )
+
+        return prefix + definition
+    
+    def _discover_routines(
+        self,
+        schema_filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Discover PostgreSQL functions and procedures with
+        rich routine metadata.
+        """
+
+        query = """
+            SELECT
+                namespace_info.nspname
+                    AS schema_name,
+                routine_info.proname
+                    AS routine_name,
+                routine_info.prokind
+                    AS routine_kind,
+                language_info.lanname
+                    AS routine_language,
+                routine_info.pronargs
+                    AS parameter_count,
+                pg_get_function_result(
+                    routine_info.oid
+                ) AS return_type,
+                pg_get_functiondef(
+                    routine_info.oid
+                ) AS routine_ddl,
+                routine_info.provolatile
+                    AS volatility_code,
+                routine_info.prosecdef
+                    AS security_definer,
+                routine_info.proleakproof
+                    AS leakproof,
+                routine_info.proparallel
+                    AS parallel_code,
+                obj_description(
+                    routine_info.oid,
+                    'pg_proc'
+                ) AS routine_comment
+            FROM pg_proc AS routine_info
+
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid =
+                 routine_info.pronamespace
+
+            JOIN pg_language AS language_info
+              ON language_info.oid =
+                 routine_info.prolang
+
+            WHERE routine_info.prokind IN (
+                'f',
+                'p'
+            )
+              AND namespace_info.nspname NOT IN (
+                  'information_schema',
+                  'pg_catalog',
+                  'pg_toast'
+              )
+              AND namespace_info.nspname
+                  NOT LIKE 'pg_temp_%%'
+              AND namespace_info.nspname
+                  NOT LIKE 'pg_toast_temp_%%'
+        """
+
+        parameters: list[Any] = []
+
+        if schema_filter:
+            query += """
+              AND namespace_info.nspname = %s
+            """
+            parameters.append(schema_filter)
+
+        query += """
+            ORDER BY
+                namespace_info.nspname,
+                routine_info.proname
+        """
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                query,
+                parameters,
+            )
+            rows = cursor.fetchall()
+
+        routines: list[dict[str, Any]] = []
+
+        for row in rows:
+            schema_name = str(row[0])
+            routine_name = str(row[1])
+            routine_kind = str(row[2])
+            routine_language = str(row[3])
+            parameter_count = int(row[4] or 0)
+
+            return_type = (
+                str(row[5])
+                if row[5] is not None
+                else None
+            )
+
+            routine_ddl = (
+                str(row[6])
+                if row[6] is not None
+                else None
+            )
+
+            volatility_code = str(row[7] or "")
+            security_definer = bool(row[8])
+            leakproof = bool(row[9])
+            parallel_code = str(row[10] or "")
+
+            routine_comment = (
+                str(row[11])
+                if row[11] is not None
+                else None
+            )
+
+            object_type = (
+                "PROCEDURE"
+                if routine_kind == "p"
+                else "FUNCTION"
+            )
+
+            if object_type == "PROCEDURE":
+                return_type = None
+
+            routine = new_object(
+                schema_name=schema_name,
+                object_name=routine_name,
+                object_type=object_type,
+                object_ddl=routine_ddl,
+                metadata={
+                    "language": (
+                        routine_language.upper()
+                    ),
+                    "parameter_count": (
+                        parameter_count
+                    ),
+                    "return_type": return_type,
+                    "materialized": False,
+                    "enabled": True,
+                    "volatility": (
+                        self._volatility_name(
+                            volatility_code
+                        )
+                    ),
+                    "security_definer": (
+                        security_definer
+                    ),
+                    "leakproof": leakproof,
+                    "parallel_safety": (
+                        self._parallel_name(
+                            parallel_code
+                        )
+                    ),
+                    "comment": routine_comment,
+                },
+            )
+
+            routines.append(routine)
+
+        return routines
+
+    @staticmethod
+    def _volatility_name(
+        volatility_code: str,
+    ) -> str | None:
+        mapping = {
+            "i": "IMMUTABLE",
+            "s": "STABLE",
+            "v": "VOLATILE",
+        }
+
+        return mapping.get(
+            str(volatility_code or "").lower()
+        )
+
+    @staticmethod
+    def _parallel_name(
+        parallel_code: str,
+    ) -> str | None:
+        mapping = {
+            "s": "SAFE",
+            "r": "RESTRICTED",
+            "u": "UNSAFE",
+        }
+
+        return mapping.get(
+            str(parallel_code or "").lower()
+        )
+
     def _discover_triggers(
         self,
         schema_filter: str | None = None,
@@ -348,3 +762,14 @@ class PostgreSQLConnector(DatabaseConnector):
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _quote_identifier(
+        identifier: str,
+    ) -> str:
+        escaped = str(identifier).replace(
+            '"',
+            '""',
+        )
+
+        return f'"{escaped}"'
