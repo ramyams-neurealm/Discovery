@@ -33,22 +33,32 @@ class DiscoveryRepository:
         effective_scopes = effective_scopes or requested_scopes
         query = text("""
             INSERT INTO demooc28.discovery_runs (
-                discovery_run_id, connection_id, requested_scopes,
-                effective_scopes, status, progress_percentage
-            ) VALUES (
-                :run_id, :connection_id,
+                discovery_run_id,
+                connection_id,
+                requested_scopes,
+                effective_scopes,
+                status,
+                progress_percentage
+            )
+            VALUES (
+                :run_id,
+                :connection_id,
                 CAST(:requested_scopes AS jsonb),
                 CAST(:effective_scopes AS jsonb),
-                'PENDING', 0
+                'PENDING',
+                0
             )
         """)
         with self.database.connect() as connection:
-            connection.execute(query, {
-                "run_id": str(run_id),
-                "connection_id": connection_id,
-                "requested_scopes": json.dumps(requested_scopes),
-                "effective_scopes": json.dumps(effective_scopes),
-            })
+            connection.execute(
+                query,
+                {
+                    "run_id": str(run_id),
+                    "connection_id": connection_id,
+                    "requested_scopes": json.dumps(requested_scopes),
+                    "effective_scopes": json.dumps(effective_scopes),
+                },
+            )
 
     def create_run_stages(
         self,
@@ -149,8 +159,7 @@ class DiscoveryRepository:
         run_id: UUID | str,
     ) -> dict[str, Any] | None:
         """Return safe datasource metadata required by the runner."""
-        query = text(
-            """
+        query = text("""
             SELECT
                 datasource.connection_id,
                 datasource.connection_name,
@@ -167,8 +176,7 @@ class DiscoveryRepository:
             JOIN demooc28.datasource_connections AS datasource
               ON datasource.connection_id = discovery_run.connection_id
             WHERE discovery_run.discovery_run_id = CAST(:run_id AS UUID)
-            """
-        )
+        """)
         with self.database.connect() as connection:
             row = connection.execute(
                 query,
@@ -972,6 +980,7 @@ class DiscoveryRepository:
         host: str,
         port: int,
         database_name: str,
+        schema_name: str | None,
         username: str,
         password: str,
         encryption_key: str,
@@ -982,11 +991,11 @@ class DiscoveryRepository:
         query = text("""
             INSERT INTO demooc28.datasource_connections (
                 connection_name, database_type, host, port, database_name,
-                username, ssl_enabled, credential_reference,
+                schema_name, username, ssl_enabled, credential_reference,
                 password_encrypted, is_active, discovery_status, created_by
             ) VALUES (
                 :connection_name, :database_type, :host, :port,
-                :database_name, :username, :ssl_enabled, NULL,
+                :database_name, :schema_name, :username, :ssl_enabled, NULL,
                 demooc28.pgp_sym_encrypt(
                     CAST(:password AS TEXT),
                     CAST(:encryption_key AS TEXT)
@@ -994,23 +1003,27 @@ class DiscoveryRepository:
                 TRUE, 'NOT_STARTED', :created_by
             )
             RETURNING connection_id, connection_name, database_type, host,
-                      port, database_name, username, ssl_enabled, is_active,
-                      discovery_status, last_discovered_at, created_at,
-                      updated_at
+                      port, database_name, schema_name, username, ssl_enabled,
+                      is_active, discovery_status, last_discovered_at,
+                      created_at, updated_at
         """)
         with self.database.connect() as connection:
-            row = connection.execute(query, {
-                "connection_name": connection_name,
-                "database_type": database_type,
-                "host": host,
-                "port": port,
-                "database_name": database_name,
-                "username": username,
-                "password": password,
-                "encryption_key": encryption_key,
-                "ssl_enabled": ssl_enabled,
-                "created_by": created_by,
-            }).mappings().one()
+            row = connection.execute(
+                query,
+                {
+                    "connection_name": connection_name,
+                    "database_type": database_type,
+                    "host": host,
+                    "port": port,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                    "username": username,
+                    "password": password,
+                    "encryption_key": encryption_key,
+                    "ssl_enabled": ssl_enabled,
+                    "created_by": created_by,
+                },
+            ).mappings().one()
         return dict(row)
 
     def get_datasource_password(
@@ -1071,31 +1084,44 @@ class DiscoveryRepository:
         return [dict(row) for row in rows]
 
     def update_datasource_connection(
-        self, connection_id: int, **values: Any
+        self,
+        connection_id: int,
+        **values: Any,
     ) -> dict[str, Any] | None:
         allowed = {
-            "connection_name", "host", "port", "database_name",
-            "username", "ssl_enabled",
+            "connection_name",
+            "host",
+            "port",
+            "database_name",
+            "schema_name",
+            "username",
+            "ssl_enabled",
         }
         updates = {
-            key: value for key, value in values.items()
+            key: value
+            for key, value in values.items()
             if key in allowed and value is not None
         }
         if not updates:
             return self.get_datasource_connection(connection_id)
-        assignments = ", ".join(f"{key} = :{key}" for key in updates)
+        assignments = ", ".join(
+            f"{key} = :{key}" for key in updates
+        )
         query = text(f"""
             UPDATE demooc28.datasource_connections
             SET {assignments}
             WHERE connection_id = :connection_id
             RETURNING connection_id, connection_name, database_type, host,
-                      port, database_name, username, ssl_enabled, is_active,
-                      discovery_status, last_discovered_at, created_at,
-                      updated_at
+                      port, database_name, schema_name, username, ssl_enabled,
+                      is_active, discovery_status, last_discovered_at,
+                      created_at, updated_at
         """)
         updates["connection_id"] = connection_id
         with self.database.connect() as connection:
-            row = connection.execute(query, updates).mappings().one_or_none()
+            row = connection.execute(
+                query,
+                updates,
+            ).mappings().one_or_none()
         return dict(row) if row else None
 
     def deactivate_datasource_connection(self, connection_id: int) -> bool:

@@ -67,7 +67,7 @@ class DatabaseConnector(ABC):
                 response_time_ms=elapsed_ms,
             )
 
-        except ModuleNotFoundError as error:
+        except ModuleNotFoundError:
             return ConnectionTestResult(
                 success=False,
                 message=(

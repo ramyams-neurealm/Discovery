@@ -27,12 +27,31 @@ from src.models.enums import (
 class ConnectionInput(BaseModel):
     """Request model used to test and save a database connection."""
 
-    connection_name: str = Field(min_length=1, max_length=255)
+    connection_name: str = Field(
+        min_length=1,
+        max_length=255,
+    )
     database_type: DatabaseType
-    host: str = Field(min_length=1, max_length=255)
-    port: int = Field(ge=1, le=65535)
-    database_name: str = Field(min_length=1, max_length=255)
-    username: str = Field(min_length=1, max_length=255)
+    host: str = Field(
+        min_length=1,
+        max_length=255,
+    )
+    port: int = Field(
+        ge=1,
+        le=65535,
+    )
+    database_name: str = Field(
+        min_length=1,
+        max_length=255,
+    )
+    schema_name: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+    username: str = Field(
+        min_length=1,
+        max_length=255,
+    )
     password: SecretStr
     ssl_enabled: bool = True
 
@@ -44,17 +63,40 @@ class ConnectionInput(BaseModel):
         mode="before",
     )
     @classmethod
-    def strip_required_text(cls, value: str) -> str:
+    def strip_required_text(
+        cls,
+        value: str,
+    ) -> str:
         if not isinstance(value, str):
             return value
 
         cleaned_value = value.strip()
 
         if not cleaned_value:
-            raise ValueError("Value must not be blank")
+            raise ValueError(
+                "Value must not be blank"
+            )
 
         return cleaned_value
 
+    @field_validator(
+        "schema_name",
+        mode="before",
+    )
+    @classmethod
+    def strip_optional_schema_name(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        if not isinstance(value, str):
+            return value
+
+        cleaned_value = value.strip()
+
+        return cleaned_value or None
 
 class ConnectionUpdate(BaseModel):
     """Optional fields used to update a saved database connection."""
@@ -77,6 +119,10 @@ class ConnectionUpdate(BaseModel):
     database_name: str | None = Field(
         default=None,
         min_length=1,
+        max_length=255,
+    )
+    schema_name: str | None = Field(
+        default=None,
         max_length=255,
     )
     username: str | None = Field(
@@ -108,6 +154,22 @@ class ConnectionUpdate(BaseModel):
             raise ValueError("Value must not be blank")
 
         return cleaned_value
+    @field_validator(
+        "schema_name",
+        mode="before",
+    )
+    @classmethod
+    def strip_optional_schema_name(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        if not isinstance(value, str):
+            return value
+
+        return value.strip() or None
 
 
 class ConnectionSafeResponse(BaseModel):
@@ -119,6 +181,7 @@ class ConnectionSafeResponse(BaseModel):
     host: str
     port: int
     database_name: str
+    schema_name: str | None = None
     username: str
     ssl_enabled: bool
     is_active: bool = True
@@ -143,6 +206,7 @@ class DiscoveryRunRequest(BaseModel):
         scopes: list[DiscoveryScope],
     ) -> list[DiscoveryScope]:
         return list(dict.fromkeys(scopes))
+    
 
 
 class DiscoveryRunResponse(BaseModel):

@@ -33,15 +33,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _safe_config(request: ConnectionInput) -> dict[str, Any]:
+def _safe_config(
+    request: ConnectionInput,
+) -> dict[str, Any]:
     """Build the non-secret source-database configuration."""
-    return {
+
+    config: dict[str, Any] = {
         "host": request.host,
         "port": request.port,
         "database_name": request.database_name,
         "username": request.username,
         "ssl_enabled": request.ssl_enabled,
     }
+
+    if request.schema_name:
+        config["schema_name"] = request.schema_name
+
+    return config
 
 
 def _effective_scopes(requested_scopes: list[str]) -> list[str]:
@@ -104,6 +112,7 @@ def test_database_connection(request: ConnectionInput) -> dict[str, Any]:
         "status": "SUCCESS",
         "message": result.message,
         "database_type": request.database_type.value,
+        "schema_name": request.schema_name,
         "response_time_ms": result.response_time_ms,
     }
 
@@ -141,6 +150,7 @@ def create_database_connection(
             host=request.host,
             port=request.port,
             database_name=request.database_name,
+            schema_name=request.schema_name,
             username=request.username,
             password=request.password.get_secret_value(),
             encryption_key=(
