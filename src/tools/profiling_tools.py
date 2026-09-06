@@ -117,6 +117,12 @@ def _profile_column(
         column=column,
         column_ref=column_ref,
     )
+    distinct_count_is_approximate = (
+        _distinct_count_is_approximate(
+            source_connector=source_connector,
+            column=column,
+        )
+    )
 
     null_count = _scalar(
         source_connector,
@@ -155,7 +161,9 @@ def _profile_column(
         "neighboring_columns": _neighboring_columns(column, all_columns),
         "null_percentage": null_percentage,
         "distinct_count": distinct_count,
-        "distinct_count_is_approximate": False,
+        "distinct_count_is_approximate": (
+            distinct_count_is_approximate
+        ),
         "masked_samples": masked_samples,
         "profile_metadata": {
             "null_count": null_count,
@@ -195,6 +203,20 @@ def _distinct_expression(
     if vendor == "POSTGRESQL" and base_data_type == "json":
         return f"CAST({column_ref} AS TEXT)"
 
+    if vendor == "ORACLE":
+        if base_data_type == "blob":
+            return (
+                "RAWTOHEX(DBMS_LOB.SUBSTR("
+                f"{column_ref}, 2000, 1))"
+            )
+
+        if base_data_type in {"clob", "nclob"}:
+            return (
+                "DBMS_LOB.SUBSTR("
+                f"{column_ref}, 4000, 1)"
+                ")"
+            )
+
     if vendor == "SQL_SERVER":
         if base_data_type in {
             "text",
@@ -211,6 +233,28 @@ def _distinct_expression(
             return f"CONVERT(VARCHAR(8000), {column_ref}, 1)"
 
     return column_ref
+
+
+def _distinct_count_is_approximate(
+    source_connector: Any,
+    column: dict[str, Any],
+) -> bool:
+    """Return whether DISTINCT uses a truncated comparable value."""
+    if _vendor(source_connector) != "ORACLE":
+        return False
+
+    native_data_type = str(
+        column.get("native_data_type")
+        or column.get("data_type")
+        or ""
+    ).strip().lower()
+    base_data_type = native_data_type.split("(", 1)[0].strip()
+
+    return base_data_type in {
+        "blob",
+        "clob",
+        "nclob",
+    }
 
 
 def _sample_values(

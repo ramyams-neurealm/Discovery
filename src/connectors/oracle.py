@@ -41,13 +41,19 @@ class OracleConnector(DatabaseConnector):
         finally:
             cursor.close()
 
-    def discover_metadata(self) -> list[dict[str, Any]]:
-        """Discover Oracle tables, views, routines, and triggers."""
+    def discover_metadata(
+        self,
+        selected_objects: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Discover Oracle objects, optionally limited to a selected set."""
 
         owner = (
             self.config.get("schema_name")
             or self.config["username"]
         ).upper()
+        selection = self._selection_by_type(
+            selected_objects
+        )
 
         query = """
             SELECT
@@ -99,6 +105,13 @@ class OracleConnector(DatabaseConnector):
                 source_type,
                 source_type,
             )
+
+            if not self._is_selected(
+                selection,
+                object_type,
+                object_name,
+            ):
+                continue
 
             object_ddl = self._get_object_ddl(
                 schema_name=schema_name,
@@ -183,14 +196,92 @@ class OracleConnector(DatabaseConnector):
             objects.append(item)
 
         objects.extend(
-            self._discover_triggers(owner)
+            self._discover_triggers(
+                owner=owner,
+                selection=selection,
+            )
         )
 
+        self._validate_selected_objects(
+            selected_objects=selected_objects,
+            discovered_objects=objects,
+        )
         return objects
-    
+
+    @staticmethod
+    def _selection_by_type(
+        selected_objects: list[dict[str, str]] | None,
+    ) -> dict[str, set[str]]:
+        selection: dict[str, set[str]] = {}
+
+        for item in selected_objects or []:
+            object_type = str(
+                item.get("object_type") or ""
+            ).upper()
+            object_name = str(
+                item.get("object_name") or ""
+            )
+
+            if object_type and object_name:
+                selection.setdefault(
+                    object_type,
+                    set(),
+                ).add(object_name)
+
+        return selection
+
+    @staticmethod
+    def _is_selected(
+        selection: dict[str, set[str]],
+        object_type: str,
+        object_name: str,
+    ) -> bool:
+        if not selection:
+            return True
+
+        return object_name in selection.get(
+            object_type,
+            set(),
+        )
+
+    @staticmethod
+    def _validate_selected_objects(
+        selected_objects: list[dict[str, str]] | None,
+        discovered_objects: list[dict[str, Any]],
+    ) -> None:
+        if not selected_objects:
+            return
+
+        requested = {
+            (
+                str(item.get("object_type") or "").upper(),
+                str(item.get("object_name") or ""),
+            )
+            for item in selected_objects
+        }
+        discovered = {
+            (
+                str(item.get("object_type") or "").upper(),
+                str(item.get("object_name") or ""),
+            )
+            for item in discovered_objects
+        }
+        missing = sorted(requested - discovered)
+
+        if missing:
+            formatted = ", ".join(
+                f"{object_type}:{object_name}"
+                for object_type, object_name in missing
+            )
+            raise ValueError(
+                "Selected objects were not found in the configured "
+                f"Oracle schema: {formatted}"
+            )
+
     def _discover_triggers(
         self,
         owner: str,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover Oracle triggers accessible to the source user."""
 
@@ -283,6 +374,13 @@ class OracleConnector(DatabaseConnector):
             )
             created_at = row[12]
             last_ddl_time = row[13]
+
+            if not self._is_selected(
+                selection or {},
+                "TRIGGER",
+                trigger_name,
+            ):
+                continue
 
             trigger_ddl = self._get_object_ddl(
                 schema_name=trigger_owner,
