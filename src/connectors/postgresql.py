@@ -37,35 +37,69 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query)
             return cursor.fetchone()
 
-    def discover_metadata(self) -> list[dict[str, Any]]:
-        """
-        Discover PostgreSQL tables, views, materialized views,
-        procedures, functions, and triggers.
-        """
-
+    def discover_metadata(
+        self,
+        selected_objects: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Discover PostgreSQL objects, optionally limited to a selected set."""
         schema_filter = self.config.get("schema_name")
-
+        selection = self._selection_by_type(selected_objects)
         objects = self._discover_tables_and_views(
             schema_filter=schema_filter,
+            selection=selection,
         )
-
-        objects.extend(
-            self._discover_routines(
-                schema_filter=schema_filter,
-            )
-        )
-
-        objects.extend(
-            self._discover_triggers(
-                schema_filter=schema_filter,
-            )
-        )
-
+        objects.extend(self._discover_routines(
+            schema_filter=schema_filter,
+            selection=selection,
+        ))
+        objects.extend(self._discover_triggers(
+            schema_filter=schema_filter,
+            selection=selection,
+        ))
+        self._validate_selected_objects(selected_objects, objects)
         return objects
+
+    @staticmethod
+    def _selection_by_type(
+        selected_objects: list[dict[str, str]] | None,
+    ) -> dict[str, set[str]]:
+        selection: dict[str, set[str]] = {}
+        for item in selected_objects or []:
+            object_type = str(item.get("object_type") or "").upper()
+            object_name = str(item.get("object_name") or "")
+            if object_type and object_name:
+                selection.setdefault(object_type, set()).add(object_name)
+        return selection
+
+    @staticmethod
+    def _is_selected(
+        selection: dict[str, set[str]],
+        object_type: str,
+        object_name: str,
+    ) -> bool:
+        return not selection or object_name in selection.get(object_type, set())
+
+    @staticmethod
+    def _validate_selected_objects(
+        selected_objects: list[dict[str, str]] | None,
+        discovered_objects: list[dict[str, Any]],
+    ) -> None:
+        if not selected_objects:
+            return
+        requested = {(str(i.get("object_type") or "").upper(), str(i.get("object_name") or "")) for i in selected_objects}
+        discovered = {(str(i.get("object_type") or "").upper(), str(i.get("object_name") or "")) for i in discovered_objects}
+        missing = sorted(requested - discovered)
+        if missing:
+            formatted = ", ".join(f"{t}:{n}" for t, n in missing)
+            raise ValueError(
+                "Selected objects were not found in the configured "
+                f"schema: {formatted}"
+            )
 
     def _discover_tables_and_views(
         self,
         schema_filter: str | None = None,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Discover PostgreSQL tables, views, and materialized views.
@@ -153,6 +187,11 @@ class PostgreSQLConnector(DatabaseConnector):
             object_type = relation_type_mapping[
                 relation_kind
             ]
+
+            if not self._is_selected(
+                selection or {}, object_type, object_name
+            ):
+                continue
 
             object_ddl = self._relation_definition(
                 schema_name=schema_name,
@@ -323,6 +362,7 @@ class PostgreSQLConnector(DatabaseConnector):
     def _discover_routines(
         self,
         schema_filter: str | None = None,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Discover PostgreSQL functions and procedures with
@@ -446,6 +486,11 @@ class PostgreSQLConnector(DatabaseConnector):
             if object_type == "PROCEDURE":
                 return_type = None
 
+            if not self._is_selected(
+                selection or {}, object_type, routine_name
+            ):
+                continue
+
             routine = new_object(
                 schema_name=schema_name,
                 object_name=routine_name,
@@ -514,6 +559,7 @@ class PostgreSQLConnector(DatabaseConnector):
     def _discover_triggers(
         self,
         schema_filter: str | None = None,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         
         """Discover user-defined PostgreSQL triggers."""
@@ -611,6 +657,11 @@ class PostgreSQLConnector(DatabaseConnector):
                 function_language,
             ) = row
             
+
+            if not self._is_selected(
+                selection or {}, "TRIGGER", str(trigger_name)
+            ):
+                continue
 
             trigger_details = (
                 self._parse_trigger_definition(

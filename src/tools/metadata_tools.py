@@ -3,9 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 
-def discover_database_metadata(source_connector: Any) -> list[dict[str, Any]]:
+def discover_database_metadata(
+    source_connector: Any,
+    selected_objects: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     """Discover metadata through the selected vendor connector."""
-    return source_connector.discover_metadata()
+    if not selected_objects:
+        return source_connector.discover_metadata()
+
+    return source_connector.discover_metadata(
+        selected_objects=selected_objects,
+    )
 
 
 def persist_discovered_metadata(

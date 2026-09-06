@@ -193,11 +193,73 @@ class ConnectionSafeResponse(BaseModel):
 # ============================================================
 
 
+class SelectedDiscoveryObject(BaseModel):
+    """One database object selected for a scoped discovery run."""
+
+    object_name: str = Field(
+        min_length=1,
+        max_length=255,
+    )
+    object_type: str = Field(
+        min_length=1,
+        max_length=64,
+    )
+
+    @field_validator(
+        "object_name",
+        mode="before",
+    )
+    @classmethod
+    def strip_object_name(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+
+        cleaned_value = value.strip()
+
+        if not cleaned_value:
+            raise ValueError("Object name must not be blank")
+
+        return cleaned_value
+
+    @field_validator(
+        "object_type",
+        mode="before",
+    )
+    @classmethod
+    def normalize_object_type(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+
+        normalized = value.strip().upper().replace(" ", "_")
+        allowed_types = {
+            "TABLE",
+            "VIEW",
+            "MATERIALIZED_VIEW",
+            "PROCEDURE",
+            "FUNCTION",
+            "TRIGGER",
+        }
+
+        if normalized not in allowed_types:
+            raise ValueError(
+                "Unsupported object type. Expected one of: "
+                + ", ".join(sorted(allowed_types))
+            )
+
+        return normalized
+
+
+
+
 class DiscoveryRunRequest(BaseModel):
     """Request used to start a Discovery run."""
 
     connection_id: int = Field(gt=0)
     scopes: list[DiscoveryScope] = Field(min_length=1)
+    selected_objects: list[SelectedDiscoveryObject] = Field(
+        default_factory=list,
+        max_length=500,
+    )
 
     @field_validator("scopes")
     @classmethod
@@ -206,6 +268,29 @@ class DiscoveryRunRequest(BaseModel):
         scopes: list[DiscoveryScope],
     ) -> list[DiscoveryScope]:
         return list(dict.fromkeys(scopes))
+
+    @field_validator("selected_objects")
+    @classmethod
+    def remove_duplicate_objects(
+        cls,
+        selected_objects: list[SelectedDiscoveryObject],
+    ) -> list[SelectedDiscoveryObject]:
+        unique_objects: list[SelectedDiscoveryObject] = []
+        seen: set[tuple[str, str]] = set()
+
+        for selected_object in selected_objects:
+            key = (
+                selected_object.object_type,
+                selected_object.object_name,
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            unique_objects.append(selected_object)
+
+        return unique_objects
     
 
 

@@ -349,11 +349,17 @@ def start_discovery_run(
     effective_scopes = _effective_scopes(requested_scopes)
     run_id = uuid4()
 
+    selected_objects = [
+        selected_object.model_dump()
+        for selected_object in request.selected_objects
+    ]
+
     repository.create_run(
         run_id=run_id,
         connection_id=request.connection_id,
         requested_scopes=requested_scopes,
         effective_scopes=effective_scopes,
+        selected_objects=selected_objects,
     )
     repository.create_run_stages(
         run_id=run_id,
@@ -370,6 +376,7 @@ def start_discovery_run(
         "connection_id": request.connection_id,
         "requested_scopes": requested_scopes,
         "effective_scopes": effective_scopes,
+        "selected_objects": selected_objects,
         "status": "PENDING",
     }
 

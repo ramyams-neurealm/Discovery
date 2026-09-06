@@ -29,14 +29,18 @@ class DiscoveryRepository:
         connection_id: int,
         requested_scopes: list[str],
         effective_scopes: list[str] | None = None,
+        selected_objects: list[dict[str, str]] | None = None,
     ) -> None:
         effective_scopes = effective_scopes or requested_scopes
+        selected_objects = selected_objects or []
+
         query = text("""
             INSERT INTO demooc28.discovery_runs (
                 discovery_run_id,
                 connection_id,
                 requested_scopes,
                 effective_scopes,
+                selected_objects,
                 status,
                 progress_percentage
             )
@@ -45,18 +49,27 @@ class DiscoveryRepository:
                 :connection_id,
                 CAST(:requested_scopes AS jsonb),
                 CAST(:effective_scopes AS jsonb),
+                CAST(:selected_objects AS jsonb),
                 'PENDING',
                 0
             )
         """)
+
         with self.database.connect() as connection:
             connection.execute(
                 query,
                 {
                     "run_id": str(run_id),
                     "connection_id": connection_id,
-                    "requested_scopes": json.dumps(requested_scopes),
-                    "effective_scopes": json.dumps(effective_scopes),
+                    "requested_scopes": json.dumps(
+                        requested_scopes
+                    ),
+                    "effective_scopes": json.dumps(
+                        effective_scopes
+                    ),
+                    "selected_objects": json.dumps(
+                        selected_objects
+                    ),
                 },
             )
 

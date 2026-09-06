@@ -11,7 +11,13 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
         super().__init__(settings, key_vault)
         self.repository = repository
 
-    def run(self, run_id: str, connection_id: int, source_connection) -> dict:
+    def run(
+        self,
+        run_id: str,
+        connection_id: int,
+        source_connection,
+        selected_objects: list[dict[str, str]] | None = None,
+    ) -> dict:
         source_connector = source_connection
         self.repository.update_run_status(
             run_id=run_id,
@@ -27,7 +33,10 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
         )
 
         try:
-            discovered_objects = discover_database_metadata(source_connector)
+            discovered_objects = discover_database_metadata(
+                source_connector=source_connector,
+                selected_objects=selected_objects,
+            )
             saved_objects = self.repository.save_discovered_metadata(
                 run_id=run_id,
                 connection_id=connection_id,

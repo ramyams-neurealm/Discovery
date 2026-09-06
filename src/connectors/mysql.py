@@ -42,19 +42,66 @@ class MySQLConnector(DatabaseConnector):
         finally:
             cursor.close()
 
-    def discover_metadata(self) -> list[dict[str, Any]]:
-        """Discover all supported MySQL database objects."""
+    def discover_metadata(
+        self,
+        selected_objects: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Discover MySQL objects, optionally limited to a selected set."""
         database_name = self.config["database_name"]
-
-        objects = self._discover_tables_and_views(database_name)
-        objects.extend(self._discover_routines(database_name))
-        objects.extend(self._discover_triggers(database_name))
-
+        selection = self._selection_by_type(selected_objects)
+        objects = self._discover_tables_and_views(database_name, selection)
+        objects.extend(self._discover_routines(database_name, selection))
+        objects.extend(self._discover_triggers(database_name, selection))
+        self._validate_selected_objects(selected_objects, objects)
         return objects
+
+    @staticmethod
+    def _selection_by_type(
+        selected_objects: list[dict[str, str]] | None,
+    ) -> dict[str, set[str]]:
+        selection: dict[str, set[str]] = {}
+        for item in selected_objects or []:
+            object_type = str(item.get("object_type") or "").upper()
+            object_name = str(item.get("object_name") or "")
+            if object_type and object_name:
+                selection.setdefault(object_type, set()).add(object_name)
+        return selection
+
+    @staticmethod
+    def _is_selected(
+        selection: dict[str, set[str]],
+        object_type: str,
+        object_name: str,
+    ) -> bool:
+        return not selection or object_name in selection.get(object_type, set())
+
+    @staticmethod
+    def _validate_selected_objects(
+        selected_objects: list[dict[str, str]] | None,
+        discovered_objects: list[dict[str, Any]],
+    ) -> None:
+        if not selected_objects:
+            return
+        requested = {
+            (str(item.get("object_type") or "").upper(), str(item.get("object_name") or ""))
+            for item in selected_objects
+        }
+        discovered = {
+            (str(item.get("object_type") or "").upper(), str(item.get("object_name") or ""))
+            for item in discovered_objects
+        }
+        missing = sorted(requested - discovered)
+        if missing:
+            formatted = ", ".join(f"{kind}:{name}" for kind, name in missing)
+            raise ValueError(
+                "Selected objects were not found in the configured "
+                f"MySQL database: {formatted}"
+            )
 
     def _discover_tables_and_views(
         self,
         database_name: str,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover MySQL tables and views with richer metadata."""
 
@@ -123,6 +170,11 @@ class MySQLConnector(DatabaseConnector):
                 if table_type == "BASE TABLE"
                 else "VIEW"
             )
+
+            if not self._is_selected(
+                selection or {}, object_type, str(object_name)
+            ):
+                continue
 
             object_ddl = self._get_table_or_view_ddl(
                 schema_name=schema_name,
@@ -221,6 +273,7 @@ class MySQLConnector(DatabaseConnector):
     def _discover_routines(
         self,
         database_name: str,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover MySQL procedures and functions with rich metadata."""
 
@@ -302,6 +355,11 @@ class MySQLConnector(DatabaseConnector):
                 else "FUNCTION"
             )
 
+            if not self._is_selected(
+                selection or {}, object_type, str(routine_name)
+            ):
+                continue
+
             object_ddl = self._get_routine_ddl(
                 schema_name=schema_name,
                 routine_name=routine_name,
@@ -358,6 +416,7 @@ class MySQLConnector(DatabaseConnector):
     def _discover_triggers(
         self,
         database_name: str,
+        selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover user-defined MySQL triggers."""
 
@@ -407,6 +466,11 @@ class MySQLConnector(DatabaseConnector):
                 sql_mode,
                 definer,
             ) = row
+
+            if not self._is_selected(
+                selection or {}, "TRIGGER", str(trigger_name)
+            ):
+                continue
 
             trigger_ddl = self._get_trigger_ddl(
                 schema_name=trigger_schema,

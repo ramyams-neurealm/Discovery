@@ -32,6 +32,7 @@ class DiscoverySupervisor:
             run_id=state["discovery_run_id"],
             connection_id=state["connection_id"],
             source_connection=state["source_connection"],
+            selected_objects=state.get("selected_objects", []),
         )
         return {**state, **output, "status": "RUNNING"}
 
@@ -271,6 +272,7 @@ class DiscoverySupervisor:
         connection_id: int,
         scopes: list[str],
         source_connection: Any,
+        selected_objects: list[dict[str, str]] | None = None,
     ) -> DiscoveryState:
         effective_scopes = set(scopes)
         if "HIPAA_COMPLIANCE" in effective_scopes:
@@ -281,6 +283,7 @@ class DiscoverySupervisor:
             "connection_id": connection_id,
             "requested_scopes": scopes,
             "effective_scopes": sorted(effective_scopes),
+            "selected_objects": selected_objects or [],
             "source_connection": source_connection,
             "errors": [],
             "status": "PENDING",

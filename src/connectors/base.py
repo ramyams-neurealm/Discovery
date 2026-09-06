@@ -46,6 +46,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def discover_metadata(
         self,
+        selected_objects: list[dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Return metadata using the shared Discovery format."""
 
