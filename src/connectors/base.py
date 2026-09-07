@@ -44,6 +44,10 @@ class DatabaseConnector(ABC):
         """Execute a small read query and return one row."""
 
     @abstractmethod
+    def list_objects(self) -> list[dict[str, str]]:
+        """Return lightweight selectable object names and types."""
+
+    @abstractmethod
     def discover_metadata(
         self,
         selected_objects: list[dict[str, str]] | None = None,

@@ -42,6 +42,33 @@ class MySQLConnector(DatabaseConnector):
         finally:
             cursor.close()
 
+    def list_objects(self) -> list[dict[str, str]]:
+        """List selectable MySQL objects without rich metadata."""
+        database_name = self.config["database_name"]
+        query = """
+            SELECT TABLE_SCHEMA, TABLE_NAME,
+                   CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 'TABLE' ELSE 'VIEW' END
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = %s AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+            UNION ALL
+            SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE
+            FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = %s
+            UNION ALL
+            SELECT TRIGGER_SCHEMA, TRIGGER_NAME, 'TRIGGER'
+            FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = %s
+            ORDER BY 1, 3, 2
+        """
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, (database_name, database_name, database_name))
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        return [
+            {"schema_name": str(row[0]), "object_name": str(row[1]), "object_type": str(row[2]).upper()}
+            for row in rows
+        ]
+
     def discover_metadata(
         self,
         selected_objects: list[dict[str, str]] | None = None,

@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.dependencies import get_database
 from src.jobs.discovery_runner import run_discovery_background
+from src.models.enums import DatabaseType
 from src.models.schemas import (
     ConnectionInput,
     ConnectionUpdate,
@@ -25,7 +26,10 @@ from src.models.schemas import (
 )
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.services.database import MetadataDatabase
-from src.tools.connection_tools import test_connection
+from src.tools.connection_tools import (
+    list_source_objects,
+    test_connection,
+)
 from src.utils.config import Settings, get_settings
 
 
@@ -226,6 +230,75 @@ def get_database_connection(
     record.pop("password_encrypted", None)
     return record
 
+
+
+
+@router.get("/connections/{connection_id}/objects")
+def list_connection_objects(
+    connection_id: int,
+    database: MetadataDatabase = Depends(get_database),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Return lightweight selectable objects from one datasource."""
+    repository = _get_repository(database)
+    datasource = repository.get_datasource_connection(connection_id)
+    if datasource is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "CONNECTION_NOT_FOUND",
+                "message": "Datasource connection not found.",
+            },
+        )
+    if not datasource.get("is_active", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "CONNECTION_INACTIVE",
+                "message": "Datasource connection is inactive.",
+            },
+        )
+    try:
+        password = repository.get_datasource_password(
+            connection_id=connection_id,
+            encryption_key=(
+                settings.source_credential_encryption_key.get_secret_value()
+            ),
+        )
+        if not password:
+            raise ValueError("Datasource password is unavailable")
+        safe_config = {
+            "host": datasource["host"],
+            "port": datasource["port"],
+            "database_name": datasource["database_name"],
+            "username": datasource["username"],
+            "ssl_enabled": datasource["ssl_enabled"],
+        }
+        if datasource.get("schema_name"):
+            safe_config["schema_name"] = datasource["schema_name"]
+        objects = list_source_objects(
+            database_type=DatabaseType(datasource["database_type"]),
+            safe_config=safe_config,
+            password=password,
+        )
+    except Exception as error:
+        logger.exception("Datasource object listing failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error_code": "OBJECT_LISTING_FAILED",
+                "message": "Selectable datasource objects could not be listed.",
+                "failure_type": error.__class__.__name__,
+            },
+        ) from error
+    finally:
+        password = None
+    return {
+        "connection_id": connection_id,
+        "schema_name": datasource.get("schema_name"),
+        "object_count": len(objects),
+        "objects": objects,
+    }
 
 @router.put("/connections/{connection_id}")
 def update_database_connection(

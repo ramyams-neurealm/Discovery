@@ -114,6 +114,41 @@ class SQLServerConnector(DatabaseConnector):
         finally:
             cursor.close()
 
+    def list_objects(self) -> list[dict[str, str]]:
+        """List selectable SQL Server objects without rich metadata."""
+        schema_filter = self.config.get("schema_name")
+        query = """
+            SELECT schema_info.name, object_info.name,
+                   CASE
+                       WHEN object_info.type = 'U' THEN 'TABLE'
+                       WHEN object_info.type = 'V' THEN 'VIEW'
+                       WHEN object_info.type IN ('P', 'PC') THEN 'PROCEDURE'
+                       WHEN object_info.type IN ('FN', 'IF', 'TF', 'FS', 'FT') THEN 'FUNCTION'
+                       WHEN object_info.type = 'TR' THEN 'TRIGGER'
+                   END AS object_type
+            FROM sys.objects AS object_info
+            JOIN sys.schemas AS schema_info
+              ON schema_info.schema_id = object_info.schema_id
+            WHERE object_info.type IN
+                  ('U', 'V', 'P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT', 'TR')
+              AND object_info.is_ms_shipped = 0
+        """
+        parameters: list[Any] = []
+        if schema_filter:
+            query += " AND schema_info.name = ?"
+            parameters.append(schema_filter)
+        query += " ORDER BY schema_info.name, object_type, object_info.name"
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, *parameters) if parameters else cursor.execute(query)
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        return [
+            {"schema_name": str(row[0]), "object_name": str(row[1]), "object_type": str(row[2])}
+            for row in rows
+        ]
+
     def discover_metadata(
         self,
         selected_objects: list[dict[str, str]] | None = None,

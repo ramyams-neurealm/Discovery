@@ -37,6 +37,47 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query)
             return cursor.fetchone()
 
+    def list_objects(self) -> list[dict[str, str]]:
+        """List selectable PostgreSQL objects without rich metadata."""
+        schema_filter = self.config.get("schema_name")
+        query = """
+            SELECT namespace_info.nspname, relation_info.relname,
+                   CASE relation_info.relkind
+                       WHEN 'r' THEN 'TABLE'
+                       WHEN 'p' THEN 'TABLE'
+                       WHEN 'v' THEN 'VIEW'
+                       WHEN 'm' THEN 'MATERIALIZED_VIEW'
+                   END AS object_type
+            FROM pg_class AS relation_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = relation_info.relnamespace
+            WHERE relation_info.relkind IN ('r', 'p', 'v', 'm')
+              AND namespace_info.nspname NOT IN
+                  ('information_schema', 'pg_catalog', 'pg_toast')
+              AND namespace_info.nspname NOT LIKE 'pg_temp_%%'
+              AND namespace_info.nspname NOT LIKE 'pg_toast_temp_%%'
+        """
+        parameters: list[Any] = []
+        if schema_filter:
+            query += " AND namespace_info.nspname = %s"
+            parameters.append(schema_filter)
+        query += " UNION ALL SELECT namespace_info.nspname, routine_info.proname, CASE routine_info.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END FROM pg_proc AS routine_info JOIN pg_namespace AS namespace_info ON namespace_info.oid = routine_info.pronamespace WHERE routine_info.prokind IN ('f', 'p') AND namespace_info.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')"
+        if schema_filter:
+            query += " AND namespace_info.nspname = %s"
+            parameters.append(schema_filter)
+        query += " UNION ALL SELECT table_namespace.nspname, trigger_info.tgname, 'TRIGGER' FROM pg_trigger AS trigger_info JOIN pg_class AS table_info ON table_info.oid = trigger_info.tgrelid JOIN pg_namespace AS table_namespace ON table_namespace.oid = table_info.relnamespace WHERE trigger_info.tgisinternal = FALSE"
+        if schema_filter:
+            query += " AND table_namespace.nspname = %s"
+            parameters.append(schema_filter)
+        query += " ORDER BY 1, 3, 2"
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, parameters)
+            rows = cursor.fetchall()
+        return [
+            {"schema_name": str(row[0]), "object_name": str(row[1]), "object_type": str(row[2])}
+            for row in rows
+        ]
+
     def discover_metadata(
         self,
         selected_objects: list[dict[str, str]] | None = None,

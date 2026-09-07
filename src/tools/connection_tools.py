@@ -189,3 +189,20 @@ def open_source_connector(
     except Exception:
         connector.close()
         raise
+
+
+def list_source_objects(
+    database_type: DatabaseType | str,
+    safe_config: dict[str, Any],
+    password: str,
+) -> list[dict[str, str]]:
+    """Open a source connector and return lightweight object choices."""
+    connector = open_source_connector(
+        database_type=database_type,
+        safe_config=safe_config,
+        password=password,
+    )
+    try:
+        return connector.list_objects()
+    finally:
+        connector.close()

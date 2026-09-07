@@ -41,6 +41,34 @@ class OracleConnector(DatabaseConnector):
         finally:
             cursor.close()
 
+    def list_objects(self) -> list[dict[str, str]]:
+        """List selectable Oracle objects without rich metadata."""
+        owner = (
+            self.config.get("schema_name")
+            or self.config["username"]
+        ).upper()
+        query = """
+            SELECT OWNER, OBJECT_NAME,
+                   CASE WHEN OBJECT_TYPE = 'MATERIALIZED VIEW'
+                        THEN 'MATERIALIZED_VIEW' ELSE OBJECT_TYPE END
+            FROM ALL_OBJECTS
+            WHERE OWNER = :owner
+              AND OBJECT_TYPE IN
+                  ('TABLE', 'VIEW', 'MATERIALIZED VIEW',
+                   'PROCEDURE', 'FUNCTION', 'TRIGGER')
+            ORDER BY OWNER, OBJECT_TYPE, OBJECT_NAME
+        """
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, owner=owner)
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        return [
+            {"schema_name": str(row[0]), "object_name": str(row[1]), "object_type": str(row[2])}
+            for row in rows
+        ]
+
     def discover_metadata(
         self,
         selected_objects: list[dict[str, str]] | None = None,
