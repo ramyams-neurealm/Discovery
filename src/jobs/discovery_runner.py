@@ -358,6 +358,9 @@ def run_discovery_background(
         selected_objects = list(
             run.get("selected_objects") or []
         )
+        selected_frameworks = list(
+            run.get("selected_frameworks") or []
+        )
 
         # ========================================================
         # Execute Discovery workflow
@@ -371,6 +374,7 @@ def run_discovery_background(
             scopes=requested_scopes,
             source_connection=source_connector,
             selected_objects=selected_objects,
+            selected_frameworks=selected_frameworks,
         )
 
     except Exception as error:

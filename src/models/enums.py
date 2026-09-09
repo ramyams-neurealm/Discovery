@@ -11,6 +11,7 @@ class DatabaseType(str, Enum):
 class DiscoveryScope(str, Enum):
     COLUMN_CLASSIFICATION = "COLUMN_CLASSIFICATION"
     DEPENDENCY_MAP = "DEPENDENCY_MAP"
+    REGULATORY_COMPLIANCE = "REGULATORY_COMPLIANCE"
     HIPAA_COMPLIANCE = "HIPAA_COMPLIANCE"
 
 
@@ -45,3 +46,15 @@ class HipaaSeverity(str, Enum):
     NEEDS_REVIEW = "NEEDS_REVIEW"
     SERIOUS = "SERIOUS"
     CRITICAL = "CRITICAL"
+
+
+class FrameworkImplementationStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    PLANNED = "PLANNED"
+    DISABLED = "DISABLED"
+
+
+class PolicyPackStatus(str, Enum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    RETIRED = "RETIRED"

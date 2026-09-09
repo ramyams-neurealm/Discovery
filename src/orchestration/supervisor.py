@@ -140,20 +140,32 @@ class DiscoverySupervisor:
 
     def _hipaa(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
-        if "HIPAA_COMPLIANCE" not in state["effective_scopes"]:
+        selected_frameworks = set(state.get("selected_frameworks", []))
+        legacy_hipaa = "HIPAA_COMPLIANCE" in state["effective_scopes"]
+        generic_compliance = (
+            "REGULATORY_COMPLIANCE" in state["effective_scopes"]
+        )
+        if not legacy_hipaa and not generic_compliance:
             return state
+        if "HIPAA" not in selected_frameworks:
+            return state
+        stage_name = (
+            "REGULATORY_COMPLIANCE"
+            if generic_compliance
+            else "HIPAA_COMPLIANCE"
+        )
 
         self.repository.update_run_status(
             run_id=run_id,
             status="RUNNING",
-            current_stage="HIPAA_COMPLIANCE",
+            current_stage=stage_name,
             progress_percentage=78,
         )
         self.repository.update_stage(
             run_id=run_id,
-            stage_name="HIPAA_COMPLIANCE",
+            stage_name=stage_name,
             stage_status="RUNNING",
-            message="Evaluating HIPAA findings for PHI columns",
+            message="Evaluating selected compliance policy packs",
         )
 
         try:
@@ -173,7 +185,7 @@ class DiscoverySupervisor:
             )
             self.repository.update_stage(
                 run_id=run_id,
-                stage_name="HIPAA_COMPLIANCE",
+                stage_name=stage_name,
                 stage_status="COMPLETED",
                 message=(
                     f"Evaluated {score.phi_columns_checked} PHI columns"
@@ -184,7 +196,7 @@ class DiscoverySupervisor:
             self.repository.update_run_status(
                 run_id=run_id,
                 status="RUNNING",
-                current_stage="HIPAA_COMPLIANCE",
+                current_stage=stage_name,
                 progress_percentage=90,
             )
             return {
@@ -201,7 +213,7 @@ class DiscoverySupervisor:
             )
             self.repository.update_stage(
                 run_id=run_id,
-                stage_name="HIPAA_COMPLIANCE",
+                stage_name=stage_name,
                 stage_status="FAILED",
                 message="HIPAA evaluation failed",
                 error_code="HIPAA_EVALUATION_FAILED",
@@ -210,7 +222,7 @@ class DiscoverySupervisor:
             self.repository.update_run_status(
                 run_id=run_id,
                 status="FAILED",
-                current_stage="HIPAA_COMPLIANCE",
+                current_stage=stage_name,
                 progress_percentage=78,
                 error_code="HIPAA_EVALUATION_FAILED",
                 error_message=safe_error,
@@ -273,10 +285,20 @@ class DiscoverySupervisor:
         scopes: list[str],
         source_connection: Any,
         selected_objects: list[dict[str, str]] | None = None,
+        selected_frameworks: list[str] | None = None,
     ) -> DiscoveryState:
         effective_scopes = set(scopes)
-        if "HIPAA_COMPLIANCE" in effective_scopes:
+        if (
+            "HIPAA_COMPLIANCE" in effective_scopes
+            or "REGULATORY_COMPLIANCE" in effective_scopes
+        ):
             effective_scopes.add("COLUMN_CLASSIFICATION")
+        framework_codes = list(selected_frameworks or [])
+        if (
+            "HIPAA_COMPLIANCE" in effective_scopes
+            and "HIPAA" not in framework_codes
+        ):
+            framework_codes.append("HIPAA")
 
         initial_state: DiscoveryState = {
             "discovery_run_id": discovery_run_id,
@@ -284,6 +306,7 @@ class DiscoverySupervisor:
             "requested_scopes": scopes,
             "effective_scopes": sorted(effective_scopes),
             "selected_objects": selected_objects or [],
+            "selected_frameworks": framework_codes,
             "source_connection": source_connection,
             "errors": [],
             "status": "PENDING",

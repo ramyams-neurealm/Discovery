@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from uuid import UUID
 
 from pydantic import (
@@ -14,7 +15,9 @@ from src.models.enums import (
     DatabaseType,
     DiscoveryScope,
     DisplayClassification,
+    FrameworkImplementationStatus,
     HipaaSeverity,
+    PolicyPackStatus,
     RunStatus,
 )
 
@@ -189,6 +192,32 @@ class ConnectionSafeResponse(BaseModel):
 
 
 # ============================================================
+# Compliance framework catalog models
+# ============================================================
+class PolicyPackVersionResponse(BaseModel):
+    version: str
+    status: PolicyPackStatus
+    scoring_enabled: bool
+    effective_from: date | None = None
+    effective_to: date | None = None
+
+
+class ComplianceFrameworkResponse(BaseModel):
+    framework_code: str
+    framework_name: str
+    description: str | None = None
+    region: str | None = None
+    implementation_status: FrameworkImplementationStatus
+    is_active: bool
+    policy_pack: PolicyPackVersionResponse | None = None
+
+
+class ComplianceFrameworkListResponse(BaseModel):
+    framework_count: int = Field(ge=0)
+    frameworks: list[ComplianceFrameworkResponse] = Field(default_factory=list)
+
+
+# ============================================================
 # Discovery run models
 # ============================================================
 
@@ -260,6 +289,10 @@ class DiscoveryRunRequest(BaseModel):
         default_factory=list,
         max_length=500,
     )
+    selected_frameworks: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+    )
 
     @field_validator("scopes")
     @classmethod
@@ -268,6 +301,39 @@ class DiscoveryRunRequest(BaseModel):
         scopes: list[DiscoveryScope],
     ) -> list[DiscoveryScope]:
         return list(dict.fromkeys(scopes))
+
+    @field_validator("selected_frameworks", mode="before")
+    @classmethod
+    def normalize_selected_frameworks(
+        cls,
+        frameworks: list[str] | None,
+    ) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for framework in frameworks or []:
+            if not isinstance(framework, str):
+                raise ValueError("Framework codes must be strings")
+            code = framework.strip().upper().replace("/", "_").replace(" ", "_")
+            if not code:
+                raise ValueError("Framework code must not be blank")
+            if code not in seen:
+                seen.add(code)
+                normalized.append(code)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_compliance_framework_selection(
+        self,
+    ) -> DiscoveryRunRequest:
+        if (
+            DiscoveryScope.REGULATORY_COMPLIANCE in self.scopes
+            and not self.selected_frameworks
+        ):
+            raise ValueError(
+                "selected_frameworks is required when "
+                "REGULATORY_COMPLIANCE is requested"
+            )
+        return self
 
     @field_validator("selected_objects")
     @classmethod
@@ -302,6 +368,7 @@ class DiscoveryRunResponse(BaseModel):
     status: RunStatus
     requested_scopes: list[DiscoveryScope] = Field(default_factory=list)
     effective_scopes: list[DiscoveryScope] = Field(default_factory=list)
+    selected_frameworks: list[str] = Field(default_factory=list)
 
 
 # ============================================================

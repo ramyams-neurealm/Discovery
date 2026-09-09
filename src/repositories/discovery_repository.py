@@ -14,6 +14,7 @@ DISCOVERY_STAGES = [
     "METADATA_PROFILING",
     "COLUMN_CLASSIFICATION",
     "DEPENDENCY_MAPPING",
+    "REGULATORY_COMPLIANCE",
     "HIPAA_COMPLIANCE",
     "REPORT_FINALIZATION",
 ]
@@ -23,6 +24,107 @@ class DiscoveryRepository:
     def __init__(self, database: MetadataDatabase):
         self.database = database
 
+    def list_compliance_frameworks(
+        self,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = text("""
+            SELECT framework.framework_code, framework.framework_name,
+                   framework.description, framework.region,
+                   framework.implementation_status, framework.is_active,
+                   policy.version, policy.status AS policy_status,
+                   policy.scoring_enabled, policy.effective_from,
+                   policy.effective_to
+            FROM demooc28.compliance_frameworks AS framework
+            LEFT JOIN LATERAL (
+                SELECT version, status, scoring_enabled, effective_from,
+                       effective_to, policy_pack_version_id
+                FROM demooc28.policy_pack_versions
+                WHERE framework_id = framework.framework_id
+                ORDER BY CASE status WHEN 'ACTIVE' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END,
+                         policy_pack_version_id DESC
+                LIMIT 1
+            ) AS policy ON TRUE
+            WHERE (:include_inactive OR framework.is_active = TRUE)
+            ORDER BY framework.framework_name
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(query, {"include_inactive": include_inactive}).mappings().all()
+        result = []
+        for row in rows:
+            item = dict(row)
+            version = item.pop("version", None)
+            policy_status = item.pop("policy_status", None)
+            scoring_enabled = item.pop("scoring_enabled", None)
+            effective_from = item.pop("effective_from", None)
+            effective_to = item.pop("effective_to", None)
+            item["policy_pack"] = None if version is None else {
+                "version": version, "status": policy_status,
+                "scoring_enabled": scoring_enabled,
+                "effective_from": effective_from, "effective_to": effective_to,
+            }
+            result.append(item)
+        return result
+
+    def validate_selected_frameworks(
+        self,
+        framework_codes: list[str],
+    ) -> dict[str, list[str]]:
+        """Separate selectable framework codes from invalid ones."""
+        requested = list(dict.fromkeys(
+            str(code).strip().upper()
+            for code in framework_codes
+            if str(code).strip()
+        ))
+        if not requested:
+            return {
+                "available": [],
+                "unknown": [],
+                "unavailable": [],
+            }
+
+        query = text("""
+            SELECT
+                framework.framework_code,
+                framework.is_active,
+                framework.implementation_status,
+                EXISTS (
+                    SELECT 1
+                    FROM demooc28.policy_pack_versions AS policy
+                    WHERE policy.framework_id = framework.framework_id
+                      AND policy.status = 'ACTIVE'
+                ) AS has_active_policy
+            FROM demooc28.compliance_frameworks AS framework
+            WHERE framework.framework_code = ANY(:framework_codes)
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                query,
+                {"framework_codes": requested},
+            ).mappings().all()
+
+        found = {row["framework_code"]: row for row in rows}
+        unknown = [code for code in requested if code not in found]
+        available: list[str] = []
+        unavailable: list[str] = []
+        for code in requested:
+            row = found.get(code)
+            if row is None:
+                continue
+            if (
+                row["is_active"]
+                and row["implementation_status"] == "AVAILABLE"
+                and row["has_active_policy"]
+            ):
+                available.append(code)
+            else:
+                unavailable.append(code)
+        return {
+            "available": available,
+            "unknown": unknown,
+            "unavailable": unavailable,
+        }
+
     def create_run(
         self,
         run_id: UUID,
@@ -30,9 +132,11 @@ class DiscoveryRepository:
         requested_scopes: list[str],
         effective_scopes: list[str] | None = None,
         selected_objects: list[dict[str, str]] | None = None,
+        selected_frameworks: list[str] | None = None,
     ) -> None:
         effective_scopes = effective_scopes or requested_scopes
         selected_objects = selected_objects or []
+        selected_frameworks = selected_frameworks or []
 
         query = text("""
             INSERT INTO demooc28.discovery_runs (
@@ -41,6 +145,7 @@ class DiscoveryRepository:
                 requested_scopes,
                 effective_scopes,
                 selected_objects,
+                selected_frameworks,
                 status,
                 progress_percentage
             )
@@ -50,6 +155,7 @@ class DiscoveryRepository:
                 CAST(:requested_scopes AS jsonb),
                 CAST(:effective_scopes AS jsonb),
                 CAST(:selected_objects AS jsonb),
+                CAST(:selected_frameworks AS jsonb),
                 'PENDING',
                 0
             )
@@ -70,6 +176,9 @@ class DiscoveryRepository:
                     "selected_objects": json.dumps(
                         selected_objects
                     ),
+                    "selected_frameworks": json.dumps(
+                        selected_frameworks
+                    ),
                 },
             )
 
@@ -83,6 +192,7 @@ class DiscoveryRepository:
         stage_scope_mapping = {
             "COLUMN_CLASSIFICATION": "COLUMN_CLASSIFICATION",
             "DEPENDENCY_MAPPING": "DEPENDENCY_MAP",
+            "REGULATORY_COMPLIANCE": "REGULATORY_COMPLIANCE",
             "HIPAA_COMPLIANCE": "HIPAA_COMPLIANCE",
         }
         query = text("""

@@ -20,6 +20,7 @@ from src.api.dependencies import get_database
 from src.jobs.discovery_runner import run_discovery_background
 from src.models.enums import DatabaseType
 from src.models.schemas import (
+    ComplianceFrameworkListResponse,
     ConnectionInput,
     ConnectionUpdate,
     DiscoveryRunRequest,
@@ -60,7 +61,10 @@ def _effective_scopes(requested_scopes: list[str]) -> list[str]:
     """Add internal workflow dependencies required for execution."""
     effective_scopes = set(requested_scopes)
 
-    if "HIPAA_COMPLIANCE" in effective_scopes:
+    if (
+        "HIPAA_COMPLIANCE" in effective_scopes
+        or "REGULATORY_COMPLIANCE" in effective_scopes
+    ):
         effective_scopes.add("COLUMN_CLASSIFICATION")
 
     return sorted(effective_scopes)
@@ -91,6 +95,17 @@ def _require_discovery_run(
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get(
+    "/compliance-frameworks",
+    response_model=ComplianceFrameworkListResponse,
+)
+def list_compliance_frameworks(
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    frameworks = _get_repository(database).list_compliance_frameworks()
+    return {"framework_count": len(frameworks), "frameworks": frameworks}
 
 
 @router.post("/connections/test")
@@ -420,6 +435,38 @@ def start_discovery_run(
 
     requested_scopes = [scope.value for scope in request.scopes]
     effective_scopes = _effective_scopes(requested_scopes)
+    selected_frameworks = list(request.selected_frameworks)
+    if (
+        "HIPAA_COMPLIANCE" in requested_scopes
+        and "HIPAA" not in selected_frameworks
+    ):
+        selected_frameworks.append("HIPAA")
+    if selected_frameworks:
+        validation = repository.validate_selected_frameworks(
+            selected_frameworks
+        )
+        if validation["unknown"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "UNKNOWN_COMPLIANCE_FRAMEWORK",
+                    "message": "One or more framework codes are unknown.",
+                    "frameworks": validation["unknown"],
+                },
+            )
+        if validation["unavailable"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "COMPLIANCE_FRAMEWORK_NOT_AVAILABLE",
+                    "message": (
+                        "One or more selected policy packs are not yet "
+                        "available for assessment."
+                    ),
+                    "frameworks": validation["unavailable"],
+                },
+            )
+        selected_frameworks = validation["available"]
     run_id = uuid4()
 
     selected_objects = [
@@ -433,6 +480,7 @@ def start_discovery_run(
         requested_scopes=requested_scopes,
         effective_scopes=effective_scopes,
         selected_objects=selected_objects,
+        selected_frameworks=selected_frameworks,
     )
     repository.create_run_stages(
         run_id=run_id,
@@ -450,6 +498,7 @@ def start_discovery_run(
         "requested_scopes": requested_scopes,
         "effective_scopes": effective_scopes,
         "selected_objects": selected_objects,
+        "selected_frameworks": selected_frameworks,
         "status": "PENDING",
     }
 

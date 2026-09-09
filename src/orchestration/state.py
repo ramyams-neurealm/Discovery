@@ -7,6 +7,7 @@ class DiscoveryState(TypedDict, total=False):
     requested_scopes: list[str]
     effective_scopes: list[str]
     selected_objects: list[dict[str, str]]
+    selected_frameworks: list[str]
     source_connection: Any
     objects: list[dict[str, Any]]
     table_profiles: list[dict[str, Any]]
