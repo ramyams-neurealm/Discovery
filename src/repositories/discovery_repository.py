@@ -1664,6 +1664,200 @@ class DiscoveryRepository:
             rows = connection.execute(query, params).mappings().all()
         return [dict(row) for row in rows]
 
+    def upsert_control_evidence(
+        self,
+        assessment_id: int,
+        control_code: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Save one user attestation and recalculate the assessment."""
+        control_query = text("""
+            SELECT control_result_id, assessment_id, control_code
+            FROM demooc28.compliance_control_results
+            WHERE assessment_id = :assessment_id
+              AND control_code = :control_code
+        """)
+        upsert_query = text("""
+            INSERT INTO demooc28.compliance_control_evidence (
+                assessment_id, control_result_id, evidence_source,
+                verification_status, verification_date, explanation,
+                internal_reference
+            ) VALUES (
+                :assessment_id, :control_result_id, 'USER_ATTESTATION',
+                :verification_status, :verification_date, :explanation,
+                :internal_reference
+            )
+            ON CONFLICT (control_result_id) DO UPDATE SET
+                verification_status = EXCLUDED.verification_status,
+                verification_date = EXCLUDED.verification_date,
+                explanation = EXCLUDED.explanation,
+                internal_reference = EXCLUDED.internal_reference,
+                evidence_source = 'USER_ATTESTATION'
+            RETURNING control_evidence_id, assessment_id, control_result_id,
+                      evidence_source, verification_status, verification_date,
+                      explanation, internal_reference, created_at, updated_at
+        """)
+        status_mapping = {
+            "CONFIRMED": ("PASS", "GOOD", False),
+            "NOT_CONFIRMED": ("FAIL", "CRITICAL", True),
+            "NOT_SURE": ("INSUFFICIENT_EVIDENCE", "NEEDS_REVIEW", True),
+        }
+        status, severity, review = status_mapping[
+            payload["verification_status"]
+        ]
+        update_control_query = text("""
+            UPDATE demooc28.compliance_control_results
+            SET assessment_status = :assessment_status,
+                severity = :severity,
+                explanation = :explanation,
+                confidence = 1.0,
+                needs_human_review = :needs_human_review
+            WHERE control_result_id = :control_result_id
+        """)
+        with self.database.connect() as connection:
+            control = connection.execute(
+                control_query,
+                {
+                    "assessment_id": assessment_id,
+                    "control_code": control_code,
+                },
+            ).mappings().one_or_none()
+            if control is None:
+                raise ValueError("Compliance control was not found")
+            evidence = dict(connection.execute(
+                upsert_query,
+                {
+                    "assessment_id": assessment_id,
+                    "control_result_id": control["control_result_id"],
+                    "verification_status": payload["verification_status"],
+                    "verification_date": payload.get("verification_date"),
+                    "explanation": payload["explanation"],
+                    "internal_reference": payload.get("internal_reference"),
+                },
+            ).mappings().one())
+            connection.execute(
+                update_control_query,
+                {
+                    "assessment_status": status,
+                    "severity": severity,
+                    "explanation": (
+                        "User attestation: " + payload["explanation"]
+                    ),
+                    "needs_human_review": review,
+                    "control_result_id": control["control_result_id"],
+                },
+            )
+        self.recalculate_compliance_score(assessment_id)
+        evidence["control_code"] = control_code
+        return evidence
+
+    def list_control_evidence(
+        self, assessment_id: int
+    ) -> list[dict[str, Any]]:
+        query = text("""
+            SELECT evidence.control_evidence_id, evidence.assessment_id,
+                   evidence.control_result_id, result.control_code,
+                   evidence.evidence_source, evidence.verification_status,
+                   evidence.verification_date, evidence.explanation,
+                   evidence.internal_reference, evidence.created_at,
+                   evidence.updated_at
+            FROM demooc28.compliance_control_evidence AS evidence
+            JOIN demooc28.compliance_control_results AS result
+              ON result.control_result_id = evidence.control_result_id
+            WHERE evidence.assessment_id = :assessment_id
+            ORDER BY result.control_code
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                query, {"assessment_id": assessment_id}
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def recalculate_compliance_score(
+        self, assessment_id: int
+    ) -> dict[str, Any]:
+        """Recalculate equal-weight score and evidence coverage."""
+        controls_query = text("""
+            SELECT assessment_status
+            FROM demooc28.compliance_control_results
+            WHERE assessment_id = :assessment_id
+        """)
+        score_query = text("""
+            UPDATE demooc28.compliance_scores
+            SET score = :score,
+                risk_band = :risk_band,
+                scoring_method = 'EVIDENCE_BASED_EQUAL_WEIGHT',
+                evidence_coverage = :evidence_coverage,
+                applicable_controls = :applicable_controls,
+                assessed_controls = :assessed_controls,
+                status_counts = CAST(:status_counts AS jsonb),
+                score_metadata = score_metadata || CAST(:metadata AS jsonb),
+                calculated_at = CURRENT_TIMESTAMP
+            WHERE assessment_id = :assessment_id
+            RETURNING compliance_score_id, score, risk_band,
+                      evidence_coverage, applicable_controls,
+                      assessed_controls, status_counts, score_metadata,
+                      calculated_at
+        """)
+        statuses = (
+            "PASS", "FAIL", "PARTIAL", "INSUFFICIENT_EVIDENCE",
+            "MANUAL_REVIEW_REQUIRED", "NOT_APPLICABLE", "NOT_ASSESSED",
+        )
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                controls_query, {"assessment_id": assessment_id}
+            ).mappings().all()
+            if not rows:
+                raise ValueError("Compliance assessment has no controls")
+            values = [row["assessment_status"] for row in rows]
+            counts = {status: values.count(status) for status in statuses}
+            applicable = sum(
+                count for status, count in counts.items()
+                if status != "NOT_APPLICABLE"
+            )
+            assessed = sum(
+                counts[status] for status in ("PASS", "PARTIAL", "FAIL")
+            )
+            coverage = round(100 * assessed / applicable, 2) if applicable else 100.0
+            if not applicable:
+                score = None
+                risk_band = "NOT_APPLICABLE"
+            elif coverage < 50:
+                score = None
+                risk_band = "INSUFFICIENT_EVIDENCE"
+            else:
+                score = round(
+                    (counts["PASS"] * 100 + counts["PARTIAL"] * 50)
+                    / assessed,
+                    2,
+                )
+                risk_band = (
+                    "GOOD" if score >= 85
+                    else "NEEDS_REVIEW" if score >= 60
+                    else "SERIOUS" if score >= 30
+                    else "CRITICAL"
+                )
+            row = connection.execute(
+                score_query,
+                {
+                    "assessment_id": assessment_id,
+                    "score": score,
+                    "risk_band": risk_band,
+                    "evidence_coverage": coverage,
+                    "applicable_controls": applicable,
+                    "assessed_controls": assessed,
+                    "status_counts": json.dumps(counts),
+                    "metadata": json.dumps({
+                        "minimum_evidence_coverage": 50,
+                        "weights": "EQUAL",
+                        "score_label": "INTERNAL_ASSESSMENT_SCORE",
+                    }),
+                },
+            ).mappings().one_or_none()
+            if row is None:
+                raise ValueError("Compliance score record was not found")
+        return dict(row)
+
     def get_compliance_results(
         self,
         run_id: UUID | str,
@@ -1696,7 +1890,22 @@ class DiscoveryRepository:
             WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
             ORDER BY framework.framework_name
         """)
-        controls_query = text("""SELECT result.*,assessment.assessment_id FROM demooc28.compliance_control_results result JOIN demooc28.compliance_assessments assessment ON assessment.assessment_id=result.assessment_id WHERE assessment.discovery_run_id=CAST(:run_id AS UUID) ORDER BY assessment.assessment_id,result.control_code""")
+        controls_query = text("""
+            SELECT result.*, assessment.assessment_id,
+                   evidence.control_evidence_id,
+                   evidence.evidence_source,
+                   evidence.verification_status AS evidence_verification_status,
+                   evidence.verification_date,
+                   evidence.explanation AS evidence_explanation,
+                   evidence.internal_reference
+            FROM demooc28.compliance_control_results AS result
+            JOIN demooc28.compliance_assessments AS assessment
+              ON assessment.assessment_id = result.assessment_id
+            LEFT JOIN demooc28.compliance_control_evidence AS evidence
+              ON evidence.control_result_id = result.control_result_id
+            WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY assessment.assessment_id, result.control_code
+        """)
         findings_query = text("""
             SELECT
                 finding.compliance_finding_id,

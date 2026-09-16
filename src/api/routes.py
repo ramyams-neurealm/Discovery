@@ -21,6 +21,7 @@ from src.jobs.discovery_runner import run_discovery_background
 from src.models.enums import DatabaseType
 from src.models.schemas import (
     ComplianceFrameworkListResponse,
+    ControlEvidenceInput,
     ConnectionInput,
     ConnectionUpdate,
     DiscoveryRunRequest,
@@ -598,6 +599,56 @@ def get_compliance_results(
         "discovery_run_id": str(run_id),
         "framework_count": len(results),
         "frameworks": results,
+    }
+
+
+@router.get("/compliance-assessments/{assessment_id}/control-evidence")
+def get_control_evidence(
+    assessment_id: int,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    if assessment_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="assessment_id must be greater than zero",
+        )
+    evidence = _get_repository(database).list_control_evidence(assessment_id)
+    return {
+        "assessment_id": assessment_id,
+        "evidence_count": len(evidence),
+        "evidence": evidence,
+    }
+
+
+@router.put(
+    "/compliance-assessments/{assessment_id}/controls/{control_code}/evidence"
+)
+def submit_control_evidence(
+    assessment_id: int,
+    control_code: str,
+    request: ControlEvidenceInput,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    repository = _get_repository(database)
+    payload = request.model_dump(mode="json")
+    payload["verification_status"] = request.verification_status.value
+    try:
+        evidence = repository.upsert_control_evidence(
+            assessment_id=assessment_id,
+            control_code=control_code.strip().upper(),
+            payload=payload,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "COMPLIANCE_CONTROL_NOT_FOUND",
+                "message": str(error),
+            },
+        ) from error
+    return {
+        "message": "Evidence saved and assessment recalculated.",
+        "evidence": evidence,
     }
 
 

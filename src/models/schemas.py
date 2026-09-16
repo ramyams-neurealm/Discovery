@@ -16,6 +16,7 @@ from src.models.enums import (
     DatabaseType,
     DiscoveryScope,
     DisplayClassification,
+    EvidenceVerificationStatus,
     FrameworkImplementationStatus,
     HipaaSeverity,
     PolicyPackStatus,
@@ -464,6 +465,49 @@ class GenericComplianceScore(BaseModel):
     assessed_controls: int = Field(ge=0)
     status_counts: dict[str, int] = Field(default_factory=dict)
     policy_version: str
+
+
+# ============================================================
+# Control evidence models
+# ============================================================
+class ControlEvidenceInput(BaseModel):
+    verification_status: EvidenceVerificationStatus
+    verification_date: date | None = None
+    explanation: str = Field(min_length=1, max_length=4000)
+    internal_reference: str | None = Field(default=None, max_length=255)
+
+    @field_validator("explanation", mode="before")
+    @classmethod
+    def strip_explanation(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Explanation must not be blank")
+        return cleaned
+
+    @field_validator("internal_reference", mode="before")
+    @classmethod
+    def strip_internal_reference(
+        cls, value: str | None
+    ) -> str | None:
+        if value is None or not isinstance(value, str):
+            return value
+        return value.strip() or None
+
+
+class ControlEvidenceResponse(BaseModel):
+    control_evidence_id: int
+    assessment_id: int
+    control_result_id: int
+    control_code: str
+    evidence_source: str
+    verification_status: EvidenceVerificationStatus
+    verification_date: date | None = None
+    explanation: str
+    internal_reference: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 # ============================================================

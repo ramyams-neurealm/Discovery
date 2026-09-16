@@ -68,3 +68,9 @@ class ComplianceAssessmentStatus(str, Enum):
     MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
     NOT_APPLICABLE = "NOT_APPLICABLE"
     NOT_ASSESSED = "NOT_ASSESSED"
+
+
+class EvidenceVerificationStatus(str, Enum):
+    CONFIRMED = "CONFIRMED"
+    NOT_CONFIRMED = "NOT_CONFIRMED"
+    NOT_SURE = "NOT_SURE"
