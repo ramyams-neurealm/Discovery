@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -1097,22 +1098,222 @@ class DiscoveryRepository:
         return int(score_id)
 
 
-    def save_hipaa_control_assessment(self, run_id: UUID | str, classification_records: list[dict[str, Any]]) -> dict[str, Any]:
-        setup_sql = text("""SELECT f.framework_id,p.policy_pack_version_id FROM demooc28.compliance_frameworks f JOIN demooc28.policy_pack_versions p ON p.framework_id=f.framework_id AND p.status='ACTIVE' WHERE f.framework_code='HIPAA' AND f.is_active=TRUE ORDER BY p.policy_pack_version_id DESC LIMIT 1""")
-        controls_sql = text("""SELECT control_code,control_title,evidence_type,evaluation_type,default_severity FROM demooc28.framework_controls WHERE policy_pack_version_id=:policy_id AND is_active=TRUE ORDER BY control_code""")
-        assessment_sql = text("""INSERT INTO demooc28.compliance_assessments(discovery_run_id,framework_id,policy_pack_version_id,status,started_at,completed_at) VALUES(CAST(:run_id AS UUID),:framework_id,:policy_id,'COMPLETED',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(discovery_run_id,framework_id,policy_pack_version_id) DO UPDATE SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP RETURNING assessment_id""")
-        control_sql = text("""INSERT INTO demooc28.compliance_control_results(assessment_id,control_code,control_title,assessment_status,severity,explanation,confidence,needs_human_review) VALUES(:assessment_id,:control_code,:control_title,:assessment_status,:severity,:explanation,:confidence,:needs_human_review)""")
-        score_sql = text("""INSERT INTO demooc28.compliance_scores(assessment_id,score,risk_band,scoring_method,evidence_coverage,applicable_controls,assessed_controls,status_counts,score_metadata) VALUES(:assessment_id,:score,:risk_band,'HIPAA_CONTROL_PACK',:coverage,:applicable,:assessed,CAST(:counts AS jsonb),CAST(:metadata AS jsonb)) ON CONFLICT(assessment_id) DO UPDATE SET score=EXCLUDED.score,risk_band=EXCLUDED.risk_band,scoring_method=EXCLUDED.scoring_method,evidence_coverage=EXCLUDED.evidence_coverage,applicable_controls=EXCLUDED.applicable_controls,assessed_controls=EXCLUDED.assessed_controls,status_counts=EXCLUDED.status_counts,score_metadata=EXCLUDED.score_metadata,calculated_at=CURRENT_TIMESTAMP RETURNING compliance_score_id""")
+    def save_control_assessment(
+        self,
+        run_id: UUID | str,
+        framework_code: str,
+        classification_records: list[dict[str, Any]],
+        evaluator: Callable,
+        finding_builder: Callable | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate and persist one policy pack through the shared engine."""
+        framework_code = framework_code.strip().upper()
+        setup_query = text("""
+            SELECT framework.framework_id,
+                   policy.policy_pack_version_id,
+                   policy.version AS catalog_policy_version
+            FROM demooc28.compliance_frameworks AS framework
+            JOIN demooc28.policy_pack_versions AS policy
+              ON policy.framework_id = framework.framework_id
+             AND policy.status = 'ACTIVE'
+            WHERE framework.framework_code = :framework_code
+              AND framework.is_active = TRUE
+            ORDER BY policy.policy_pack_version_id DESC
+            LIMIT 1
+        """)
+        controls_query = text("""
+            SELECT control_code, control_title, evidence_type,
+                   evaluation_type, default_severity, weight
+            FROM demooc28.framework_controls
+            WHERE policy_pack_version_id = :policy_pack_version_id
+              AND is_active = TRUE
+            ORDER BY control_code
+        """)
+        assessment_query = text("""
+            INSERT INTO demooc28.compliance_assessments (
+                discovery_run_id, framework_id, policy_pack_version_id,
+                status, started_at, completed_at
+            ) VALUES (
+                CAST(:run_id AS UUID), :framework_id,
+                :policy_pack_version_id, 'COMPLETED',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (
+                discovery_run_id, framework_id, policy_pack_version_id
+            ) DO UPDATE SET
+                status = 'COMPLETED',
+                completed_at = CURRENT_TIMESTAMP
+            RETURNING assessment_id
+        """)
+        insert_control_query = text("""
+            INSERT INTO demooc28.compliance_control_results (
+                assessment_id, control_code, control_title,
+                assessment_status, severity, explanation,
+                confidence, needs_human_review
+            ) VALUES (
+                :assessment_id, :control_code, :control_title,
+                :assessment_status, :severity, :explanation,
+                :confidence, :needs_human_review
+            )
+        """)
+        finding_query = text("""
+            INSERT INTO demooc28.compliance_findings (
+                assessment_id, classification_id, severity,
+                assessment_status, finding, recommendation, confidence,
+                needs_human_review, review_reason, verification_status,
+                source_finding_type, source_finding_id
+            ) VALUES (
+                :assessment_id, :classification_id, :severity,
+                :assessment_status, :finding, :recommendation, :confidence,
+                :needs_human_review, :review_reason, :verification_status,
+                :source_finding_type, :source_finding_id
+            )
+            ON CONFLICT (
+                assessment_id, source_finding_type, source_finding_id
+            ) WHERE source_finding_type IS NOT NULL
+                    AND source_finding_id IS NOT NULL
+            DO UPDATE SET
+                classification_id = EXCLUDED.classification_id,
+                severity = EXCLUDED.severity,
+                assessment_status = EXCLUDED.assessment_status,
+                finding = EXCLUDED.finding,
+                recommendation = EXCLUDED.recommendation,
+                confidence = EXCLUDED.confidence,
+                needs_human_review = EXCLUDED.needs_human_review,
+                review_reason = EXCLUDED.review_reason,
+                verification_status = EXCLUDED.verification_status
+            RETURNING compliance_finding_id
+        """)
+        score_query = text("""
+            INSERT INTO demooc28.compliance_scores (
+                assessment_id, score, risk_band, scoring_method,
+                evidence_coverage, applicable_controls, assessed_controls,
+                status_counts, score_metadata
+            ) VALUES (
+                :assessment_id, :score, :risk_band,
+                'CONTROL_PACK_INITIAL_ASSESSMENT', :evidence_coverage,
+                :applicable_controls, :assessed_controls,
+                CAST(:status_counts AS jsonb), CAST(:score_metadata AS jsonb)
+            )
+            ON CONFLICT (assessment_id) DO UPDATE SET
+                score = EXCLUDED.score,
+                risk_band = EXCLUDED.risk_band,
+                scoring_method = EXCLUDED.scoring_method,
+                evidence_coverage = EXCLUDED.evidence_coverage,
+                applicable_controls = EXCLUDED.applicable_controls,
+                assessed_controls = EXCLUDED.assessed_controls,
+                status_counts = EXCLUDED.status_counts,
+                score_metadata = EXCLUDED.score_metadata,
+                calculated_at = CURRENT_TIMESTAMP
+            RETURNING compliance_score_id
+        """)
         with self.database.connect() as connection:
-            setup=connection.execute(setup_sql).mappings().one()
-            controls=[dict(row) for row in connection.execute(controls_sql,{"policy_id":setup["policy_pack_version_id"]}).mappings().all()]
-            if not controls: raise ValueError("HIPAA policy pack contains no active controls")
-            results,summary=evaluate_hipaa_controls(controls,classification_records)
-            assessment_id=int(connection.execute(assessment_sql,{"run_id":str(run_id),"framework_id":setup["framework_id"],"policy_id":setup["policy_pack_version_id"]}).scalar_one())
-            connection.execute(text("DELETE FROM demooc28.compliance_control_results WHERE assessment_id=:id"),{"id":assessment_id})
-            for result in results: connection.execute(control_sql,{"assessment_id":assessment_id,**result})
-            score_id=int(connection.execute(score_sql,{"assessment_id":assessment_id,"score":summary["score"],"risk_band":summary["risk_band"],"coverage":summary["evidence_coverage"],"applicable":summary["applicable_controls"],"assessed":summary["assessed_controls"],"counts":json.dumps(summary["status_counts"]),"metadata":json.dumps({"phi_columns_checked":summary["phi_columns_checked"],"policy_version":summary["policy_version"],"provisional":True})}).scalar_one())
-        return {"assessment_id":assessment_id,"score_id":score_id,"summary":summary}
+            setup = connection.execute(
+                setup_query, {"framework_code": framework_code}
+            ).mappings().one_or_none()
+            if setup is None:
+                raise ValueError(
+                    f"Active policy-pack version not found: {framework_code}"
+                )
+            controls = [
+                dict(row)
+                for row in connection.execute(
+                    controls_query,
+                    {
+                        "policy_pack_version_id": setup[
+                            "policy_pack_version_id"
+                        ]
+                    },
+                ).mappings().all()
+            ]
+            if not controls:
+                raise ValueError(
+                    f"Policy pack contains no controls: {framework_code}"
+                )
+            control_results, summary = evaluator(
+                controls, classification_records
+            )
+            assessment_id = int(connection.execute(
+                assessment_query,
+                {
+                    "run_id": str(run_id),
+                    "framework_id": setup["framework_id"],
+                    "policy_pack_version_id": setup[
+                        "policy_pack_version_id"
+                    ],
+                },
+            ).scalar_one())
+            connection.execute(
+                text("""
+                    DELETE FROM demooc28.compliance_control_results
+                    WHERE assessment_id = :assessment_id
+                """),
+                {"assessment_id": assessment_id},
+            )
+            for control_result in control_results:
+                connection.execute(
+                    insert_control_query,
+                    {
+                        "assessment_id": assessment_id,
+                        **control_result,
+                    },
+                )
+            finding_ids: list[int] = []
+            if finding_builder is not None:
+                for finding in finding_builder(classification_records):
+                    finding_id = int(connection.execute(
+                        finding_query,
+                        {"assessment_id": assessment_id, **finding},
+                    ).scalar_one())
+                    finding_ids.append(finding_id)
+
+            score_metadata = {
+                "framework_code": framework_code,
+                "policy_version": summary["policy_version"],
+                "provisional": True,
+                "minimum_evidence_coverage": 50,
+                "weights": "EQUAL",
+                "score_label": "INTERNAL_ASSESSMENT_SCORE",
+            }
+            for key, value in summary.items():
+                if key.endswith("_columns_checked"):
+                    score_metadata[key] = value
+            score_id = int(connection.execute(
+                score_query,
+                {
+                    "assessment_id": assessment_id,
+                    "score": summary["score"],
+                    "risk_band": summary["risk_band"],
+                    "evidence_coverage": summary["evidence_coverage"],
+                    "applicable_controls": summary[
+                        "applicable_controls"
+                    ],
+                    "assessed_controls": summary["assessed_controls"],
+                    "status_counts": json.dumps(
+                        summary["status_counts"]
+                    ),
+                    "score_metadata": json.dumps(score_metadata),
+                },
+            ).scalar_one())
+        return {
+            "assessment_id": assessment_id,
+            "score_id": score_id,
+            "finding_ids": finding_ids,
+            "summary": summary,
+        }
+
+    def save_hipaa_control_assessment(
+        self,
+        run_id: UUID | str,
+        classification_records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Compatibility wrapper retained for existing callers."""
+        return self.save_control_assessment(
+            run_id=run_id,
+            framework_code="HIPAA",
+            classification_records=classification_records,
+            evaluator=evaluate_hipaa_controls,
+        )
 
     def save_generic_hipaa_result(
         self,

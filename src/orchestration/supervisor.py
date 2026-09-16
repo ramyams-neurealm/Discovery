@@ -7,6 +7,11 @@ from langgraph.graph import END, START, StateGraph
 from src.orchestration.state import DiscoveryState
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.tools.classification_policy import build_classification_summary, reconcile_linked_identifiers
+from src.tools.hipaa_control_policy import evaluate_hipaa_controls
+from src.tools.pci_dss_control_policy import (
+    build_pci_dss_classification_findings,
+    evaluate_pci_dss_controls,
+)
 
 
 class DiscoverySupervisor:
@@ -138,102 +143,107 @@ class DiscoverySupervisor:
             )
             raise
 
-    def _hipaa(self, state: DiscoveryState) -> DiscoveryState:
+    def _compliance(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
-        selected_frameworks = set(state.get("selected_frameworks", []))
-        legacy_hipaa = "HIPAA_COMPLIANCE" in state["effective_scopes"]
-        generic_compliance = (
+        selected = set(state.get("selected_frameworks", []))
+        generic_requested = (
             "REGULATORY_COMPLIANCE" in state["effective_scopes"]
         )
-        if not legacy_hipaa and not generic_compliance:
-            return state
-        if "HIPAA" not in selected_frameworks:
+        legacy_hipaa = (
+            "HIPAA_COMPLIANCE" in state["effective_scopes"]
+        )
+        if not generic_requested and not legacy_hipaa:
             return state
         stage_name = (
             "REGULATORY_COMPLIANCE"
-            if generic_compliance
+            if generic_requested
             else "HIPAA_COMPLIANCE"
         )
-
         self.repository.update_run_status(
-            run_id=run_id,
-            status="RUNNING",
-            current_stage=stage_name,
-            progress_percentage=78,
+            run_id, "RUNNING", stage_name, 78
         )
         self.repository.update_stage(
-            run_id=run_id,
-            stage_name=stage_name,
-            stage_status="RUNNING",
-            message="Evaluating selected compliance policy packs",
+            run_id, stage_name, "RUNNING",
+            "Evaluating selected compliance policy packs",
         )
-
         try:
-            findings, score = self.hipaa_agent.evaluate(
-                state.get("classifications", [])
+            classification_records = state.get(
+                "classification_records", []
             )
-            saved_findings = self.repository.save_hipaa_findings(
-                run_id=run_id,
-                findings=findings,
-                classification_records=state.get(
-                    "classification_records", []
-                ),
-            )
-            score_id = self.repository.save_hipaa_score(
-                run_id=run_id,
-                score=score,
-            )
-            generic_hipaa_result = self.repository.save_generic_hipaa_result(
-                run_id=run_id, hipaa_findings=saved_findings, hipaa_score=score
-            )
-            hipaa_control_assessment = self.repository.save_hipaa_control_assessment(
-                run_id=run_id, classification_records=state.get("classification_records", [])
-            )
+            assessments: dict[str, Any] = {}
+            legacy_output: dict[str, Any] = {}
+
+            if "HIPAA" in selected:
+                findings, score = self.hipaa_agent.evaluate(
+                    state.get("classifications", [])
+                )
+                saved_findings = self.repository.save_hipaa_findings(
+                    run_id, findings, classification_records
+                )
+                score_id = self.repository.save_hipaa_score(
+                    run_id, score
+                )
+                generic_hipaa = (
+                    self.repository.save_generic_hipaa_result(
+                        run_id, saved_findings, score
+                    )
+                )
+                assessments["HIPAA"] = (
+                    self.repository.save_control_assessment(
+                        run_id=run_id,
+                        framework_code="HIPAA",
+                        classification_records=classification_records,
+                        evaluator=evaluate_hipaa_controls,
+                    )
+                )
+                legacy_output = {
+                    "hipaa_findings": findings,
+                    "hipaa_finding_records": saved_findings,
+                    "hipaa_score": score,
+                    "hipaa_score_id": score_id,
+                    "generic_hipaa_result": generic_hipaa,
+                }
+
+            if "PCI_DSS" in selected:
+                assessments["PCI_DSS"] = (
+                    self.repository.save_control_assessment(
+                        run_id=run_id,
+                        framework_code="PCI_DSS",
+                        classification_records=classification_records,
+                        evaluator=evaluate_pci_dss_controls,
+                        finding_builder=(
+                            build_pci_dss_classification_findings
+                        ),
+                    )
+                )
+
             self.repository.update_stage(
-                run_id=run_id,
-                stage_name=stage_name,
-                stage_status="COMPLETED",
-                message=(
-                    f"Evaluated {score.phi_columns_checked} PHI columns"
-                ),
-                processed_items=score.phi_columns_checked,
-                total_items=score.phi_columns_checked,
+                run_id, stage_name, "COMPLETED",
+                f"Evaluated {len(assessments)} policy pack(s)",
+                len(assessments), len(selected),
             )
             self.repository.update_run_status(
-                run_id=run_id,
-                status="RUNNING",
-                current_stage=stage_name,
-                progress_percentage=90,
+                run_id, "RUNNING", stage_name, 90
             )
             return {
                 **state,
-                "hipaa_findings": findings,
-                "hipaa_finding_records": saved_findings,
-                "hipaa_score": score,
-                "hipaa_score_id": score_id,
-                "generic_hipaa_result": generic_hipaa_result,
-                "hipaa_control_assessment": hipaa_control_assessment,
+                **legacy_output,
+                "compliance_assessments": assessments,
             }
         except Exception as error:
             safe_error = (
-                "HIPAA evaluation failed: "
+                "Compliance evaluation failed: "
                 f"{error.__class__.__name__}"
             )
             self.repository.update_stage(
-                run_id=run_id,
-                stage_name=stage_name,
-                stage_status="FAILED",
-                message="HIPAA evaluation failed",
-                error_code="HIPAA_EVALUATION_FAILED",
+                run_id, stage_name, "FAILED",
+                "Compliance evaluation failed",
+                error_code="COMPLIANCE_EVALUATION_FAILED",
                 error_message=safe_error,
             )
             self.repository.update_run_status(
-                run_id=run_id,
-                status="FAILED",
-                current_stage=stage_name,
-                progress_percentage=78,
-                error_code="HIPAA_EVALUATION_FAILED",
-                error_message=safe_error,
+                run_id, "FAILED", stage_name, 78,
+                "COMPLIANCE_EVALUATION_FAILED", safe_error,
             )
             raise
 
@@ -275,14 +285,14 @@ class DiscoverySupervisor:
         graph.add_node("metadata_and_profiling", self._metadata)
         graph.add_node("classification", self._classify)
         graph.add_node("dependency_mapping", self._dependencies)
-        graph.add_node("hipaa", self._hipaa)
+        graph.add_node("compliance", self._compliance)
         graph.add_node("report", self._report)
 
         graph.add_edge(START, "metadata_and_profiling")
         graph.add_edge("metadata_and_profiling", "classification")
         graph.add_edge("classification", "dependency_mapping")
-        graph.add_edge("dependency_mapping", "hipaa")
-        graph.add_edge("hipaa", "report")
+        graph.add_edge("dependency_mapping", "compliance")
+        graph.add_edge("compliance", "report")
         graph.add_edge("report", END)
         return graph.compile()
 
