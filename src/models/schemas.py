@@ -12,6 +12,7 @@ from pydantic import (
 )
 
 from src.models.enums import (
+    ComplianceAssessmentStatus,
     DatabaseType,
     DiscoveryScope,
     DisplayClassification,
@@ -437,6 +438,32 @@ class DependencyEdge(BaseModel):
     target_column: str | None = None
     evidence_source: str
     confidence: float = Field(ge=0, le=1)
+
+
+# ============================================================
+# Generic compliance result models
+# ============================================================
+class GenericComplianceFinding(BaseModel):
+    framework_code: str
+    control_code: str
+    assessment_status: ComplianceAssessmentStatus
+    severity: str
+    finding: str
+    recommendation: str
+    confidence: float = Field(ge=0, le=1)
+    needs_human_review: bool = False
+    review_reason: str | None = None
+
+
+class GenericComplianceScore(BaseModel):
+    framework_code: str
+    score: float | None = Field(default=None, ge=0, le=100)
+    risk_band: str
+    evidence_coverage: float = Field(ge=0, le=100)
+    applicable_controls: int = Field(ge=0)
+    assessed_controls: int = Field(ge=0)
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    policy_version: str
 
 
 # ============================================================

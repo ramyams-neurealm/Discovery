@@ -586,6 +586,21 @@ def get_focused_dependencies(
     }
 
 
+@router.get("/discovery-runs/{run_id}/compliance-results")
+def get_compliance_results(
+    run_id: UUID,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    repository = _get_repository(database)
+    _require_discovery_run(repository, run_id)
+    results = repository.get_compliance_results(run_id)
+    return {
+        "discovery_run_id": str(run_id),
+        "framework_count": len(results),
+        "frameworks": results,
+    }
+
+
 @router.get("/discovery-runs/{run_id}/hipaa-findings")
 def get_hipaa_findings(
     run_id: UUID,

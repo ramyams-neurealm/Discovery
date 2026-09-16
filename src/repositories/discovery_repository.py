@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import text
 
 from src.services.database import MetadataDatabase
+from src.tools.hipaa_control_policy import evaluate_hipaa_controls
 
 
 DISCOVERY_STAGES = [
@@ -1096,6 +1097,282 @@ class DiscoveryRepository:
         return int(score_id)
 
 
+    def save_hipaa_control_assessment(self, run_id: UUID | str, classification_records: list[dict[str, Any]]) -> dict[str, Any]:
+        setup_sql = text("""SELECT f.framework_id,p.policy_pack_version_id FROM demooc28.compliance_frameworks f JOIN demooc28.policy_pack_versions p ON p.framework_id=f.framework_id AND p.status='ACTIVE' WHERE f.framework_code='HIPAA' AND f.is_active=TRUE ORDER BY p.policy_pack_version_id DESC LIMIT 1""")
+        controls_sql = text("""SELECT control_code,control_title,evidence_type,evaluation_type,default_severity FROM demooc28.framework_controls WHERE policy_pack_version_id=:policy_id AND is_active=TRUE ORDER BY control_code""")
+        assessment_sql = text("""INSERT INTO demooc28.compliance_assessments(discovery_run_id,framework_id,policy_pack_version_id,status,started_at,completed_at) VALUES(CAST(:run_id AS UUID),:framework_id,:policy_id,'COMPLETED',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(discovery_run_id,framework_id,policy_pack_version_id) DO UPDATE SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP RETURNING assessment_id""")
+        control_sql = text("""INSERT INTO demooc28.compliance_control_results(assessment_id,control_code,control_title,assessment_status,severity,explanation,confidence,needs_human_review) VALUES(:assessment_id,:control_code,:control_title,:assessment_status,:severity,:explanation,:confidence,:needs_human_review)""")
+        score_sql = text("""INSERT INTO demooc28.compliance_scores(assessment_id,score,risk_band,scoring_method,evidence_coverage,applicable_controls,assessed_controls,status_counts,score_metadata) VALUES(:assessment_id,:score,:risk_band,'HIPAA_CONTROL_PACK',:coverage,:applicable,:assessed,CAST(:counts AS jsonb),CAST(:metadata AS jsonb)) ON CONFLICT(assessment_id) DO UPDATE SET score=EXCLUDED.score,risk_band=EXCLUDED.risk_band,scoring_method=EXCLUDED.scoring_method,evidence_coverage=EXCLUDED.evidence_coverage,applicable_controls=EXCLUDED.applicable_controls,assessed_controls=EXCLUDED.assessed_controls,status_counts=EXCLUDED.status_counts,score_metadata=EXCLUDED.score_metadata,calculated_at=CURRENT_TIMESTAMP RETURNING compliance_score_id""")
+        with self.database.connect() as connection:
+            setup=connection.execute(setup_sql).mappings().one()
+            controls=[dict(row) for row in connection.execute(controls_sql,{"policy_id":setup["policy_pack_version_id"]}).mappings().all()]
+            if not controls: raise ValueError("HIPAA policy pack contains no active controls")
+            results,summary=evaluate_hipaa_controls(controls,classification_records)
+            assessment_id=int(connection.execute(assessment_sql,{"run_id":str(run_id),"framework_id":setup["framework_id"],"policy_id":setup["policy_pack_version_id"]}).scalar_one())
+            connection.execute(text("DELETE FROM demooc28.compliance_control_results WHERE assessment_id=:id"),{"id":assessment_id})
+            for result in results: connection.execute(control_sql,{"assessment_id":assessment_id,**result})
+            score_id=int(connection.execute(score_sql,{"assessment_id":assessment_id,"score":summary["score"],"risk_band":summary["risk_band"],"coverage":summary["evidence_coverage"],"applicable":summary["applicable_controls"],"assessed":summary["assessed_controls"],"counts":json.dumps(summary["status_counts"]),"metadata":json.dumps({"phi_columns_checked":summary["phi_columns_checked"],"policy_version":summary["policy_version"],"provisional":True})}).scalar_one())
+        return {"assessment_id":assessment_id,"score_id":score_id,"summary":summary}
+
+    def save_generic_hipaa_result(
+        self,
+        run_id: UUID | str,
+        hipaa_findings: list[dict[str, Any]],
+        hipaa_score: Any,
+    ) -> dict[str, Any]:
+        """Dual-write legacy HIPAA output into generic compliance tables."""
+        score_payload = (
+            hipaa_score.model_dump()
+            if hasattr(hipaa_score, "model_dump")
+            else dict(hipaa_score)
+        )
+        framework_query = text("""
+            SELECT
+                framework.framework_id,
+                policy.policy_pack_version_id
+            FROM demooc28.compliance_frameworks AS framework
+            JOIN demooc28.policy_pack_versions AS policy
+              ON policy.framework_id = framework.framework_id
+             AND policy.status = 'ACTIVE'
+            WHERE framework.framework_code = 'HIPAA'
+              AND framework.is_active = TRUE
+              AND framework.implementation_status = 'AVAILABLE'
+            ORDER BY policy.policy_pack_version_id DESC
+            LIMIT 1
+        """)
+        assessment_query = text("""
+            INSERT INTO demooc28.compliance_assessments (
+                discovery_run_id,
+                framework_id,
+                policy_pack_version_id,
+                status,
+                started_at,
+                completed_at
+            ) VALUES (
+                CAST(:run_id AS UUID),
+                :framework_id,
+                :policy_pack_version_id,
+                'COMPLETED',
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (
+                discovery_run_id,
+                framework_id,
+                policy_pack_version_id
+            ) DO UPDATE SET
+                status = 'COMPLETED',
+                completed_at = CURRENT_TIMESTAMP
+            RETURNING assessment_id
+        """)
+        finding_query = text("""
+            INSERT INTO demooc28.compliance_findings (
+                assessment_id,
+                classification_id,
+                severity,
+                assessment_status,
+                finding,
+                recommendation,
+                confidence,
+                needs_human_review,
+                review_reason,
+                verification_status,
+                source_finding_type,
+                source_finding_id
+            ) VALUES (
+                :assessment_id,
+                :classification_id,
+                :severity,
+                :assessment_status,
+                :finding,
+                :recommendation,
+                :confidence,
+                :needs_human_review,
+                :review_reason,
+                :verification_status,
+                'HIPAA_FINDING',
+                :source_finding_id
+            )
+            ON CONFLICT (
+                assessment_id,
+                source_finding_type,
+                source_finding_id
+            ) WHERE source_finding_type IS NOT NULL
+                    AND source_finding_id IS NOT NULL
+            DO UPDATE SET
+                classification_id = EXCLUDED.classification_id,
+                severity = EXCLUDED.severity,
+                assessment_status = EXCLUDED.assessment_status,
+                finding = EXCLUDED.finding,
+                recommendation = EXCLUDED.recommendation,
+                confidence = EXCLUDED.confidence,
+                needs_human_review = EXCLUDED.needs_human_review,
+                review_reason = EXCLUDED.review_reason,
+                verification_status = EXCLUDED.verification_status
+            RETURNING compliance_finding_id
+        """)
+        evidence_query = text("""
+            INSERT INTO demooc28.compliance_finding_evidence (
+                compliance_finding_id,
+                evidence_type,
+                evidence_record_id,
+                evidence_summary,
+                evidence_metadata
+            )
+            SELECT
+                :compliance_finding_id,
+                'COLUMN_CLASSIFICATION',
+                :classification_id,
+                'HIPAA evaluation used a provisional PHI classification.',
+                CAST(:evidence_metadata AS jsonb)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM demooc28.compliance_finding_evidence
+                WHERE compliance_finding_id = :compliance_finding_id
+                  AND evidence_type = 'COLUMN_CLASSIFICATION'
+                  AND evidence_record_id = :classification_id
+            )
+        """)
+        score_query = text("""
+            INSERT INTO demooc28.compliance_scores (
+                assessment_id,
+                score,
+                risk_band,
+                scoring_method,
+                evidence_coverage,
+                applicable_controls,
+                assessed_controls,
+                status_counts,
+                score_metadata
+            ) VALUES (
+                :assessment_id,
+                :score,
+                :risk_band,
+                'LEGACY_HIPAA_INTERNAL_POLICY',
+                :evidence_coverage,
+                :applicable_controls,
+                :assessed_controls,
+                CAST(:status_counts AS jsonb),
+                CAST(:score_metadata AS jsonb)
+            )
+            ON CONFLICT (assessment_id) DO UPDATE SET
+                score = EXCLUDED.score,
+                risk_band = EXCLUDED.risk_band,
+                scoring_method = EXCLUDED.scoring_method,
+                evidence_coverage = EXCLUDED.evidence_coverage,
+                applicable_controls = EXCLUDED.applicable_controls,
+                assessed_controls = EXCLUDED.assessed_controls,
+                status_counts = EXCLUDED.status_counts,
+                score_metadata = EXCLUDED.score_metadata,
+                calculated_at = CURRENT_TIMESTAMP
+            RETURNING compliance_score_id
+        """)
+
+        with self.database.connect() as connection:
+            framework = connection.execute(
+                framework_query
+            ).mappings().one_or_none()
+            if framework is None:
+                raise ValueError(
+                    "An active, available HIPAA policy-pack version was not found"
+                )
+            assessment_id = int(connection.execute(
+                assessment_query,
+                {
+                    "run_id": str(run_id),
+                    "framework_id": framework["framework_id"],
+                    "policy_pack_version_id": framework[
+                        "policy_pack_version_id"
+                    ],
+                },
+            ).scalar_one())
+
+            generic_status_counts = {
+                "PASS": 0,
+                "FAIL": 0,
+                "PARTIAL": 0,
+                "INSUFFICIENT_EVIDENCE": 0,
+                "MANUAL_REVIEW_REQUIRED": 0,
+                "NOT_APPLICABLE": 0,
+                "NOT_ASSESSED": 0,
+            }
+            generic_finding_ids: list[int] = []
+            for finding in hipaa_findings:
+                raw_severity = finding.get("severity")
+                severity = str(getattr(raw_severity, "value", raw_severity) or "").strip().upper()
+                assessment_status = (
+                    "PASS"
+                    if severity == "GOOD"
+                    else "INSUFFICIENT_EVIDENCE"
+                )
+                generic_status_counts[assessment_status] += 1
+                generic_finding_id = int(connection.execute(
+                    finding_query,
+                    {
+                        "assessment_id": assessment_id,
+                        "classification_id": finding["classification_id"],
+                        "severity": severity,
+                        "assessment_status": assessment_status,
+                        "finding": finding["finding"],
+                        "recommendation": finding["recommendation"],
+                        "confidence": finding["confidence"],
+                        "needs_human_review": finding.get(
+                            "needs_human_review", False
+                        ),
+                        "review_reason": finding.get("review_reason"),
+                        "verification_status": finding.get(
+                            "verification_status", "PROVISIONAL"
+                        ),
+                        "source_finding_id": finding["finding_id"],
+                    },
+                ).scalar_one())
+                generic_finding_ids.append(generic_finding_id)
+                connection.execute(
+                    evidence_query,
+                    {
+                        "compliance_finding_id": generic_finding_id,
+                        "classification_id": finding["classification_id"],
+                        "evidence_metadata": json.dumps({
+                            "source": "column_classifications",
+                            "evidence_mode": "PROVISIONAL_CLASSIFICATION",
+                        }),
+                    },
+                )
+
+            phi_count = int(score_payload.get("phi_columns_checked", 0))
+            if phi_count == 0:
+                generic_status_counts["NOT_APPLICABLE"] = 1
+            score_id = int(connection.execute(
+                score_query,
+                {
+                    "assessment_id": assessment_id,
+                    "score": score_payload.get("score"),
+                    "risk_band": score_payload["risk_band"],
+                    # Classification evidence exists, but safeguard-control
+                    # evidence is not yet collected by the current HIPAA agent.
+                    "evidence_coverage": 0.0,
+                    "applicable_controls": phi_count,
+                    "assessed_controls": phi_count,
+                    "status_counts": json.dumps(generic_status_counts),
+                    "score_metadata": json.dumps({
+                        "legacy_policy_version": score_payload[
+                            "policy_version"
+                        ],
+                        "severity_counts": score_payload[
+                            "severity_counts"
+                        ],
+                        "provisional": True,
+                        "score_label": "INTERNAL_ASSESSMENT_SCORE",
+                    }),
+                },
+            ).scalar_one())
+
+        return {
+            "assessment_id": assessment_id,
+            "finding_ids": generic_finding_ids,
+            "score_id": score_id,
+        }
+
     def create_datasource_connection(
         self,
         connection_name: str,
@@ -1386,6 +1663,98 @@ class DiscoveryRepository:
         with self.database.connect() as connection:
             rows = connection.execute(query, params).mappings().all()
         return [dict(row) for row in rows]
+
+    def get_compliance_results(
+        self,
+        run_id: UUID | str,
+    ) -> list[dict[str, Any]]:
+        """Return separate generic results for all frameworks in one run."""
+        assessments_query = text("""
+            SELECT
+                assessment.assessment_id,
+                framework.framework_code,
+                framework.framework_name,
+                policy.version AS policy_version,
+                assessment.status,
+                score.score,
+                score.risk_band,
+                score.scoring_method,
+                score.evidence_coverage,
+                score.applicable_controls,
+                score.assessed_controls,
+                score.status_counts,
+                score.score_metadata,
+                score.calculated_at
+            FROM demooc28.compliance_assessments AS assessment
+            JOIN demooc28.compliance_frameworks AS framework
+              ON framework.framework_id = assessment.framework_id
+            JOIN demooc28.policy_pack_versions AS policy
+              ON policy.policy_pack_version_id =
+                 assessment.policy_pack_version_id
+            LEFT JOIN demooc28.compliance_scores AS score
+              ON score.assessment_id = assessment.assessment_id
+            WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY framework.framework_name
+        """)
+        controls_query = text("""SELECT result.*,assessment.assessment_id FROM demooc28.compliance_control_results result JOIN demooc28.compliance_assessments assessment ON assessment.assessment_id=result.assessment_id WHERE assessment.discovery_run_id=CAST(:run_id AS UUID) ORDER BY assessment.assessment_id,result.control_code""")
+        findings_query = text("""
+            SELECT
+                finding.compliance_finding_id,
+                assessment.assessment_id,
+                finding.classification_id,
+                finding.severity,
+                finding.assessment_status,
+                finding.finding,
+                finding.recommendation,
+                finding.confidence,
+                finding.needs_human_review,
+                finding.review_reason,
+                finding.verification_status,
+                object.schema_name,
+                object.object_name AS table_name,
+                column_info.column_name,
+                classification.display_classification,
+                classification.sensitive_data_type
+            FROM demooc28.compliance_findings AS finding
+            JOIN demooc28.compliance_assessments AS assessment
+              ON assessment.assessment_id = finding.assessment_id
+            LEFT JOIN demooc28.column_classifications AS classification
+              ON classification.classification_id = finding.classification_id
+            LEFT JOIN demooc28.discovered_columns AS column_info
+              ON column_info.column_id = classification.column_id
+            LEFT JOIN demooc28.discovered_objects AS object
+              ON object.object_id = column_info.object_id
+            WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY assessment.assessment_id, finding.compliance_finding_id
+        """)
+        params = {"run_id": str(run_id)}
+        with self.database.connect() as connection:
+            assessments = [
+                dict(row)
+                for row in connection.execute(
+                    assessments_query, params
+                ).mappings().all()
+            ]
+            findings = [
+                dict(row)
+                for row in connection.execute(
+                    findings_query, params
+                ).mappings().all()
+            ]
+            controls = [dict(row) for row in connection.execute(controls_query, params).mappings().all()]
+        findings_by_assessment: dict[int, list[dict[str, Any]]] = {}
+        for finding in findings:
+            findings_by_assessment.setdefault(
+                int(finding.pop("assessment_id")), []
+            ).append(finding)
+        controls_by_assessment: dict[int, list[dict[str, Any]]] = {}
+        for control in controls:
+            controls_by_assessment.setdefault(int(control.pop("assessment_id")), []).append(control)
+        for assessment in assessments:
+            assessment_id = int(assessment["assessment_id"])
+            assessment["controls"] = controls_by_assessment.get(assessment_id, [])
+            assessment["findings"] = findings_by_assessment.get(assessment_id, [])
+        return assessments
 
     def get_hipaa_result(self, run_id: UUID | str) -> dict[str, Any]:
         findings_query = text("""

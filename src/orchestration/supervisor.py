@@ -183,6 +183,12 @@ class DiscoverySupervisor:
                 run_id=run_id,
                 score=score,
             )
+            generic_hipaa_result = self.repository.save_generic_hipaa_result(
+                run_id=run_id, hipaa_findings=saved_findings, hipaa_score=score
+            )
+            hipaa_control_assessment = self.repository.save_hipaa_control_assessment(
+                run_id=run_id, classification_records=state.get("classification_records", [])
+            )
             self.repository.update_stage(
                 run_id=run_id,
                 stage_name=stage_name,
@@ -205,6 +211,8 @@ class DiscoverySupervisor:
                 "hipaa_finding_records": saved_findings,
                 "hipaa_score": score,
                 "hipaa_score_id": score_id,
+                "generic_hipaa_result": generic_hipaa_result,
+                "hipaa_control_assessment": hipaa_control_assessment,
             }
         except Exception as error:
             safe_error = (

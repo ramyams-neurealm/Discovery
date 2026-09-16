@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.models.enums import DisplayClassification
+from src.tools.compliance_recommendation import normalize_sensitive_data_type
 
 
 # Reference/catalog tables contain standardized business or healthcare values.
@@ -170,6 +171,22 @@ def _normalize_known_column(
         )
         return True
 
+    # Banking account fields. AccountID is an internal financial identifier;
+    # AccountNumber is an actual bank-account number.
+    if column == "accountnumber":
+        _set(result, DisplayClassification.FINANCIAL, "BANK_ACCOUNT_NUMBER",
+             "The column explicitly contains a bank-account number.")
+        return True
+    if column in {"accountid", "accounttypeid"}:
+        _set(result, DisplayClassification.FINANCIAL, "FINANCIAL_INFORMATION",
+             "The column is an internal identifier used in a financial-account context.")
+        return True
+    if column in {"currentbalance", "availablebalance", "holdbalance",
+                  "minimumopeningbalance", "minimumdailybalance",
+                  "monthlymaintenancefee", "overdraftlimit", "baseinterestrate"}:
+        _set(result, DisplayClassification.FINANCIAL, "FINANCIAL_INFORMATION",
+             "The column contains financial account information.")
+        return True
     # Financial identifiers and values.
     if column in {"paymentid", "claimpaymentid"}:
         _set(
@@ -461,6 +478,17 @@ def normalize_classification(
 
     _normalize_known_column(result, table, column)
     _enforce_type_consistency(result)
+
+    normalized_type, used_fallback = normalize_sensitive_data_type(
+        result.sensitive_data_type
+    )
+    result.sensitive_data_type = normalized_type
+    if used_fallback:
+        result.needs_human_review = True
+        result.review_reason = (
+            result.review_reason
+            or "The model returned a data type outside the approved vocabulary."
+        )
 
     if result.confidence < confidence_threshold:
         result.needs_human_review = True

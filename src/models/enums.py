@@ -58,3 +58,13 @@ class PolicyPackStatus(str, Enum):
     DRAFT = "DRAFT"
     ACTIVE = "ACTIVE"
     RETIRED = "RETIRED"
+
+
+class ComplianceAssessmentStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    PARTIAL = "PARTIAL"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    NOT_ASSESSED = "NOT_ASSESSED"
