@@ -1,13 +1,4 @@
-import importlib.util
-from pathlib import Path
-
-MODULE_PATH = Path(__file__).with_name("pci_dss_control_policy.py")
-spec = importlib.util.spec_from_file_location(
-    "pci_dss_control_policy", MODULE_PATH
-)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-evaluate_pci_dss_controls = module.evaluate_pci_dss_controls
+from src.tools.pci_dss_control_policy import evaluate_pci_dss_controls
 
 
 def controls():
