@@ -1,7 +1,12 @@
 import importlib.util
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).with_name("pci_dss_control_policy.py")
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "tools"
+    / "pci_dss_control_policy.py"
+)
 spec = importlib.util.spec_from_file_location(
     "pci_dss_control_policy", MODULE_PATH
 )
