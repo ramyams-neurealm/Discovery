@@ -3,13 +3,14 @@ from collections import Counter
 from typing import Any
 
 STATUSES = ("PASS", "FAIL", "PARTIAL", "INSUFFICIENT_EVIDENCE", "MANUAL_REVIEW_REQUIRED", "NOT_APPLICABLE", "NOT_ASSESSED")
-# Establish applicability using BANK_ACCOUNT_NUMBER and banking classifications[cite: 1]
-GLBA_FINANCIAL_DATA_TYPES = {"BANK_ACCOUNT_NUMBER", "FINANCIAL"}
+
+GLBA_FINANCIAL_DATA_TYPES = {
+    "BANK_ACCOUNT_NUMBER"
+}
 
 def enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) or "").strip().upper()
 
-# Uses the same input/output contract as the HIPAA evaluator[cite: 1]
 def evaluate_glba_controls(controls: list[dict[str, Any]], classifications: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     fin_rows = [row for row in classifications if bool(row.get("is_sensitive", True)) and enum_value(row.get("sensitive_data_type")) in GLBA_FINANCIAL_DATA_TYPES]
     results = []
@@ -32,7 +33,6 @@ def evaluate_glba_controls(controls: list[dict[str, Any]], classifications: list
             confidence = 1.0
             review = False
         else:
-            # Missing evidence becomes INSUFFICIENT_EVIDENCE, not FAIL[cite: 1]
             status = "INSUFFICIENT_EVIDENCE"
             explanation = f"Financial data exists, but {control.get('evidence_type')} evidence was not collected by this discovery run."
             confidence = 1.0
@@ -57,7 +57,6 @@ def evaluate_glba_controls(controls: list[dict[str, Any]], classifications: list
     if not applicable: 
         risk_band = "NOT_APPLICABLE"
     elif coverage < 50: 
-        # If evidence coverage is below 50%, score = null and risk band = INSUFFICIENT_EVIDENCE[cite: 1]
         risk_band = "INSUFFICIENT_EVIDENCE"
     else:
         points = {"PASS": 100.0, "PARTIAL": 50.0, "FAIL": 0.0}

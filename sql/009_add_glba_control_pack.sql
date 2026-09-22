@@ -20,7 +20,7 @@ SELECT
     control.control_description,
     control.evidence_type,
     control.evaluation_type,
-    1.0, -- Equal weight of 1
+    1.0,
     'NEEDS_REVIEW',
     control.recommendation_template,
     jsonb_build_object(
@@ -31,7 +31,7 @@ SELECT
 FROM demooc28.compliance_frameworks AS framework
 JOIN demooc28.policy_pack_versions AS policy
   ON policy.framework_id = framework.framework_id
- AND policy.status = 'PLANNED' -- Keep GLBA PLANNED until reviewed
+ AND policy.status = 'ACTIVE'
 CROSS JOIN (
     VALUES
     (
