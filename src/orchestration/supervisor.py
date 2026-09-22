@@ -12,6 +12,10 @@ from src.tools.pci_dss_control_policy import (
     build_pci_dss_classification_findings,
     evaluate_pci_dss_controls,
 )
+from src.tools.glba_control_policy import (
+    build_glba_classification_findings,
+    evaluate_glba_controls,
+)
 
 
 class DiscoverySupervisor:
@@ -213,6 +217,18 @@ class DiscoverySupervisor:
                         evaluator=evaluate_pci_dss_controls,
                         finding_builder=(
                             build_pci_dss_classification_findings
+                        ),
+                    )
+                )
+            if "GLBA" in selected:
+                assessments["GLBA"] = (
+                    self.repository.save_control_assessment(
+                        run_id=run_id,
+                        framework_code="GLBA",
+                        classification_records=classification_records,
+                        evaluator=evaluate_glba_controls,
+                        finding_builder=(
+                            build_glba_classification_findings
                         ),
                     )
                 )
