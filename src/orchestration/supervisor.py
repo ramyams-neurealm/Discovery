@@ -12,8 +12,10 @@ from src.tools.pci_dss_control_policy import (
     build_pci_dss_classification_findings,
     evaluate_pci_dss_controls,
 )
-
-
+from src.tools.gdpr_control_policy import (
+    build_gdpr_classification_findings,
+    evaluate_gdpr_controls,
+)
 class DiscoverySupervisor:
     def __init__(
         self,
@@ -215,8 +217,18 @@ class DiscoverySupervisor:
                             build_pci_dss_classification_findings
                         ),
                     )
-                )
-
+                )if "GDPR" in selected:
+    assessments["GDPR"] = (
+        self.repository.save_control_assessment(
+            run_id=run_id,
+            framework_code="GDPR",
+            classification_records=classification_records,
+            evaluator=evaluate_gdpr_controls,
+            finding_builder=(
+                build_gdpr_classification_findings
+            ),
+        )
+    )
             self.repository.update_stage(
                 run_id, stage_name, "COMPLETED",
                 f"Evaluated {len(assessments)} policy pack(s)",
