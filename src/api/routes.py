@@ -19,6 +19,11 @@ from sqlalchemy.exc import IntegrityError
 from src.api.dependencies import get_database
 from src.jobs.discovery_runner import run_discovery_background
 from src.models.enums import DatabaseType
+from src.models.compliance_foundation import (
+    ClientPolicyInput,
+    PrincipalGroupInput,
+    PrincipalGroupMemberInput,
+)
 from src.models.schemas import (
     ComplianceFrameworkListResponse,
     ControlEvidenceInput,
@@ -648,6 +653,200 @@ def submit_control_evidence(
         ) from error
     return {
         "message": "Evidence saved and assessment recalculated.",
+        "evidence": evidence,
+    }
+
+
+@router.post(
+    "/tenants/{tenant_id}/principal-groups",
+    status_code=status.HTTP_201_CREATED,
+)
+def create_tenant_principal_group(
+    tenant_id: int,
+    request: PrincipalGroupInput,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Create one logical principal group for a tenant."""
+    if tenant_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tenant_id must be greater than zero",
+        )
+    if request.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "TENANT_ID_MISMATCH",
+                "message": (
+                    "The path tenant_id must match the request tenant_id."
+                ),
+            },
+        )
+    try:
+        group = _get_repository(database).create_principal_group(request)
+    except IntegrityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "PRINCIPAL_GROUP_EXISTS",
+                "message": (
+                    "A principal group with this code already exists "
+                    "for the tenant."
+                ),
+            },
+        ) from error
+    return group
+
+
+@router.post(
+    "/principal-groups/{principal_group_id}/members",
+    status_code=status.HTTP_201_CREATED,
+)
+def add_tenant_principal_group_member(
+    principal_group_id: int,
+    request: PrincipalGroupMemberInput,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Add a database or identity principal to a logical group."""
+    if principal_group_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="principal_group_id must be greater than zero",
+        )
+    try:
+        member = _get_repository(database).add_principal_group_member(
+            principal_group_id=principal_group_id,
+            payload=request,
+        )
+    except IntegrityError as error:
+        original_error = getattr(error, "orig", error)
+        error_text = str(original_error).lower()
+        if "foreign key" in error_text:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error_code": "PRINCIPAL_GROUP_NOT_FOUND",
+                    "message": "The principal group was not found.",
+                },
+            ) from error
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "PRINCIPAL_GROUP_MEMBER_EXISTS",
+                "message": (
+                    "This principal is already a member of the group."
+                ),
+            },
+        ) from error
+    return member
+
+
+@router.post(
+    "/tenants/{tenant_id}/policies",
+    status_code=status.HTTP_201_CREATED,
+)
+def create_tenant_policy(
+    tenant_id: int,
+    request: ClientPolicyInput,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Create one validated tenant-specific compliance policy."""
+    if tenant_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tenant_id must be greater than zero",
+        )
+    if request.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "TENANT_ID_MISMATCH",
+                "message": (
+                    "The path tenant_id must match the request tenant_id."
+                ),
+            },
+        )
+    try:
+        policy = _get_repository(database).create_client_policy(request)
+    except IntegrityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "CLIENT_POLICY_EXISTS",
+                "message": (
+                    "A client policy with this code already exists "
+                    "for the tenant."
+                ),
+            },
+        ) from error
+    return policy
+
+
+@router.get("/tenants/{tenant_id}/policies")
+def list_tenant_policies(
+    tenant_id: int,
+    policy_status: str | None = None,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """List client policies, optionally filtered by policy status."""
+    if tenant_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tenant_id must be greater than zero",
+        )
+    normalized_status = (
+        policy_status.strip().upper() if policy_status else None
+    )
+    if normalized_status not in {
+        None,
+        "DRAFT",
+        "ACTIVE",
+        "INACTIVE",
+        "RETIRED",
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "INVALID_POLICY_STATUS",
+                "message": (
+                    "policy_status must be DRAFT, ACTIVE, INACTIVE, "
+                    "or RETIRED."
+                ),
+            },
+        )
+    policies = _get_repository(database).list_client_policies(
+        tenant_id=tenant_id,
+        policy_status=normalized_status,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "policy_count": len(policies),
+        "policies": policies,
+    }
+
+
+@router.get("/discovery-runs/{run_id}/evidence")
+def get_discovery_evidence(
+    run_id: UUID,
+    evidence_category: str | None = None,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Return normalized automatic evidence persisted for one run."""
+    repository = _get_repository(database)
+    _require_discovery_run(repository, run_id)
+    normalized_category = (
+        evidence_category.strip().upper()
+        if evidence_category
+        else None
+    )
+    evidence = repository.list_collected_evidence(
+        run_id=run_id,
+        evidence_category=normalized_category,
+    )
+    return {
+        "discovery_run_id": str(run_id),
+        "evidence_category": normalized_category,
+        "evidence_count": len(evidence),
         "evidence": evidence,
     }
 

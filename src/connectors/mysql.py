@@ -42,6 +42,145 @@ class MySQLConnector(DatabaseConnector):
         finally:
             cursor.close()
 
+    def collect_access_evidence(self) -> list[dict[str, Any]]:
+        """Collect read-only MySQL account, role, and privilege evidence.
+
+        Each evidence record reports its own collection status so that a
+        permission error or unsupported feature is not mistaken for a
+        compliance failure.
+        """
+        database_name = self.config["database_name"]
+        evidence: list[dict[str, Any]] = []
+
+        def collect(
+            *,
+            source: str,
+            query: str,
+            params: tuple[Any, ...] = (),
+            scope: str,
+        ) -> None:
+            cursor = self.connection.cursor(dictionary=True)
+            try:
+                cursor.execute(query, params)
+                rows = [dict(row) for row in cursor.fetchall()]
+                evidence.append(
+                    {
+                        "evidence_type": "DATABASE_PERMISSIONS",
+                        "source": source,
+                        "scope": scope,
+                        "database_name": database_name,
+                        "collection_status": "COLLECTED",
+                        "records": rows,
+                        "record_count": len(rows),
+                    }
+                )
+            except Exception as error:
+                message = str(error).lower()
+                permission_denied = any(
+                    phrase in message
+                    for phrase in (
+                        "access denied",
+                        "permission denied",
+                        "command denied",
+                        "not allowed",
+                    )
+                )
+                evidence.append(
+                    {
+                        "evidence_type": "DATABASE_PERMISSIONS",
+                        "source": source,
+                        "scope": scope,
+                        "database_name": database_name,
+                        "collection_status": (
+                            "PERMISSION_DENIED"
+                            if permission_denied
+                            else "COLLECTION_FAILED"
+                        ),
+                        "records": [],
+                        "record_count": 0,
+                        "error_type": error.__class__.__name__,
+                    }
+                )
+            finally:
+                cursor.close()
+
+        collect(
+            source="MYSQL_CURRENT_ACCOUNT",
+            query="""
+                SELECT
+                    CURRENT_USER() AS authenticated_account,
+                    USER() AS connected_account,
+                    CURRENT_ROLE() AS active_roles
+            """,
+            scope="SESSION",
+        )
+        collect(
+            source="MYSQL_USER_PRIVILEGES",
+            query="""
+                SELECT
+                    GRANTEE AS principal,
+                    PRIVILEGE_TYPE AS privilege_type,
+                    IS_GRANTABLE AS is_grantable
+                FROM information_schema.USER_PRIVILEGES
+                ORDER BY GRANTEE, PRIVILEGE_TYPE
+            """,
+            scope="GLOBAL",
+        )
+        collect(
+            source="MYSQL_SCHEMA_PRIVILEGES",
+            query="""
+                SELECT
+                    GRANTEE AS principal,
+                    TABLE_SCHEMA AS schema_name,
+                    PRIVILEGE_TYPE AS privilege_type,
+                    IS_GRANTABLE AS is_grantable
+                FROM information_schema.SCHEMA_PRIVILEGES
+                WHERE TABLE_SCHEMA = %s
+                ORDER BY GRANTEE, PRIVILEGE_TYPE
+            """,
+            params=(database_name,),
+            scope="SCHEMA",
+        )
+        collect(
+            source="MYSQL_TABLE_PRIVILEGES",
+            query="""
+                SELECT
+                    GRANTEE AS principal,
+                    TABLE_SCHEMA AS schema_name,
+                    TABLE_NAME AS table_name,
+                    PRIVILEGE_TYPE AS privilege_type,
+                    IS_GRANTABLE AS is_grantable
+                FROM information_schema.TABLE_PRIVILEGES
+                WHERE TABLE_SCHEMA = %s
+                ORDER BY GRANTEE, TABLE_NAME, PRIVILEGE_TYPE
+            """,
+            params=(database_name,),
+            scope="TABLE",
+        )
+        collect(
+            source="MYSQL_COLUMN_PRIVILEGES",
+            query="""
+                SELECT
+                    GRANTEE AS principal,
+                    TABLE_SCHEMA AS schema_name,
+                    TABLE_NAME AS table_name,
+                    COLUMN_NAME AS column_name,
+                    PRIVILEGE_TYPE AS privilege_type,
+                    IS_GRANTABLE AS is_grantable
+                FROM information_schema.COLUMN_PRIVILEGES
+                WHERE TABLE_SCHEMA = %s
+                ORDER BY
+                    GRANTEE,
+                    TABLE_NAME,
+                    COLUMN_NAME,
+                    PRIVILEGE_TYPE
+            """,
+            params=(database_name,),
+            scope="COLUMN",
+        )
+
+        return evidence
+
     def list_objects(self) -> list[dict[str, str]]:
         """List selectable MySQL objects without rich metadata."""
         database_name = self.config["database_name"]

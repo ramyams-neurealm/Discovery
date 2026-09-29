@@ -4,6 +4,9 @@ from src.agents.base import BaseAgent
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.tools.metadata_tools import discover_database_metadata
 from src.tools.profiling_tools import profile_tables
+from src.tools.evidence_normalization import (
+    normalize_mysql_access_evidence,
+)
 
 
 class MetadataDiscoveryProfilingAgent(BaseAgent):
@@ -37,6 +40,39 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
                 source_connector=source_connector,
                 selected_objects=selected_objects,
             )
+
+            # Security evidence collection is connector-specific and optional.
+            # MySQL currently provides read-only account and privilege evidence.
+            collect_access_evidence = getattr(
+                source_connector,
+                "collect_access_evidence",
+                None,
+            )
+            if callable(collect_access_evidence):
+                access_evidence = collect_access_evidence()
+            else:
+                access_evidence = []
+
+            datasource = self.repository.get_datasource_connection(
+                connection_id
+            )
+            tenant_id = int((datasource or {}).get("tenant_id") or 0)
+            if tenant_id <= 0:
+                raise ValueError(
+                    "Datasource tenant ownership is unavailable"
+                )
+
+            normalized_evidence = normalize_mysql_access_evidence(
+                access_evidence,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                discovery_run_id=run_id,
+            )
+            saved_security_evidence = [
+                self.repository.save_collected_evidence(item)
+                for item in normalized_evidence
+            ]
+
             saved_objects = self.repository.save_discovered_metadata(
                 run_id=run_id,
                 connection_id=connection_id,
@@ -72,6 +108,8 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
                 "objects": saved_objects,
                 "table_profiles": saved_table_profiles,
                 "column_profiles": saved_column_profiles,
+                "security_evidence": access_evidence,
+                "security_evidence_records": saved_security_evidence,
             }
 
         except Exception as error:

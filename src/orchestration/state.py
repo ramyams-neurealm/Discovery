@@ -15,6 +15,7 @@ class DiscoveryState(TypedDict, total=False):
     classifications: list[Any]
     classification_records: list[dict[str, Any]]
     classification_summary: dict[str, Any]
+    security_evidence: list[dict[str, Any]]
     dependencies: list[Any]
     dependency_records: list[dict[str, Any]]
     hipaa_findings: list[Any]

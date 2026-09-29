@@ -254,6 +254,7 @@ class DiscoveryRepository:
         query = text(
             """
             SELECT
+                tenant_id,
                 connection_id,
                 connection_name,
                 database_type,
@@ -286,6 +287,7 @@ class DiscoveryRepository:
         """Return safe datasource metadata required by the runner."""
         query = text("""
             SELECT
+                datasource.tenant_id,
                 datasource.connection_id,
                 datasource.connection_name,
                 datasource.database_type,
@@ -1105,6 +1107,8 @@ class DiscoveryRepository:
         classification_records: list[dict[str, Any]],
         evaluator: Callable,
         finding_builder: Callable | None = None,
+        security_evidence: list[dict[str, Any]] | None = None,
+        policy_context: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Evaluate and persist one policy pack through the shared engine."""
         framework_code = framework_code.strip().upper()
@@ -1155,6 +1159,7 @@ class DiscoveryRepository:
                 :assessment_status, :severity, :explanation,
                 :confidence, :needs_human_review
             )
+            RETURNING control_result_id
         """)
         finding_query = text("""
             INSERT INTO demooc28.compliance_findings (
@@ -1230,9 +1235,17 @@ class DiscoveryRepository:
                 raise ValueError(
                     f"Policy pack contains no controls: {framework_code}"
                 )
-            control_results, summary = evaluator(
-                controls, classification_records
-            )
+            if security_evidence is None:
+                control_results, summary = evaluator(
+                    controls, classification_records
+                )
+            else:
+                control_results, summary = evaluator(
+                    controls,
+                    classification_records,
+                    security_evidence,
+                    policy_context,
+                )
             assessment_id = int(connection.execute(
                 assessment_query,
                 {
@@ -1250,14 +1263,129 @@ class DiscoveryRepository:
                 """),
                 {"assessment_id": assessment_id},
             )
+            control_result_ids: dict[str, int] = {}
+            traceability: dict[str, dict[str, Any]] = {}
             for control_result in control_results:
-                connection.execute(
+                insert_payload = {
+                    key: value
+                    for key, value in control_result.items()
+                    if key != "decision_trace"
+                }
+                control_result_id = int(connection.execute(
                     insert_control_query,
                     {
                         "assessment_id": assessment_id,
-                        **control_result,
+                        **insert_payload,
                     },
-                )
+                ).scalar_one())
+                control_code = str(control_result["control_code"])
+                control_result_ids[control_code] = control_result_id
+
+                decision_trace = control_result.get("decision_trace") or {}
+                if decision_trace:
+                    linked_policy_ids = sorted({
+                        int(policy_id)
+                        for item in (
+                            list(decision_trace.get("matched", []))
+                            + list(decision_trace.get("violations", []))
+                        )
+                        for policy_id in item.get("policy_ids", [])
+                    })
+                    if not linked_policy_ids and policy_context:
+                        linked_policy_ids = sorted({
+                            int(item["client_policy_id"])
+                            for item in policy_context
+                            if item.get("client_policy_id") is not None
+                        })
+                    for client_policy_id in linked_policy_ids:
+                        connection.execute(
+                            text("""
+                                INSERT INTO demooc28.control_policy_links (
+                                    control_result_id, client_policy_id
+                                ) VALUES (
+                                    :control_result_id, :client_policy_id
+                                )
+                                ON CONFLICT (
+                                    control_result_id, client_policy_id
+                                ) DO NOTHING
+                            """),
+                            {
+                                "control_result_id": control_result_id,
+                                "client_policy_id": client_policy_id,
+                            },
+                        )
+
+                    evidence_rows = connection.execute(
+                        text("""
+                            SELECT evidence_id, principal_data,
+                                   resource_data, observation_data
+                            FROM demooc28.collected_evidence
+                            WHERE discovery_run_id = CAST(:run_id AS UUID)
+                              AND evidence_category = 'DATABASE_PERMISSIONS'
+                            ORDER BY evidence_id
+                        """),
+                        {"run_id": str(run_id)},
+                    ).mappings().all()
+                    linked_evidence_ids: list[int] = []
+                    for evidence_row in evidence_rows:
+                        principal_name = str(
+                            (evidence_row["principal_data"] or {}).get(
+                                "principal_name"
+                            ) or ""
+                        ).strip().lower()
+                        privilege = str(
+                            (evidence_row["observation_data"] or {}).get(
+                                "privilege"
+                            ) or ""
+                        ).strip().upper()
+                        matching_items = [
+                            item
+                            for item in (
+                                list(decision_trace.get("matched", []))
+                                + list(decision_trace.get("violations", []))
+                            )
+                            if str(item.get("principal") or "").lower()
+                            == principal_name
+                            and str(item.get("privilege") or "").upper()
+                            == privilege
+                        ]
+                        if not matching_items:
+                            continue
+                        is_violation = any(
+                            item in decision_trace.get("violations", [])
+                            for item in matching_items
+                        )
+                        usage_type = (
+                            "CONFLICTING" if is_violation else "SUPPORTING"
+                        )
+                        evidence_id = int(evidence_row["evidence_id"])
+                        connection.execute(
+                            text("""
+                                INSERT INTO demooc28.control_evidence_links (
+                                    control_result_id, evidence_id, usage_type
+                                ) VALUES (
+                                    :control_result_id, :evidence_id,
+                                    :usage_type
+                                )
+                                ON CONFLICT (
+                                    control_result_id, evidence_id
+                                ) DO UPDATE SET
+                                    usage_type = EXCLUDED.usage_type
+                            """),
+                            {
+                                "control_result_id": control_result_id,
+                                "evidence_id": evidence_id,
+                                "usage_type": usage_type,
+                            },
+                        )
+                        linked_evidence_ids.append(evidence_id)
+
+                    traceability[control_code] = {
+                        "applied_policy_ids": linked_policy_ids,
+                        "evidence_ids": sorted(set(linked_evidence_ids)),
+                        "allowed": decision_trace.get("matched", []),
+                        "violations": decision_trace.get("violations", []),
+                    }
             finding_ids: list[int] = []
             if finding_builder is not None:
                 for finding in finding_builder(classification_records):
@@ -1299,6 +1427,8 @@ class DiscoveryRepository:
             "assessment_id": assessment_id,
             "score_id": score_id,
             "finding_ids": finding_ids,
+            "control_result_ids": control_result_ids,
+            "traceability": traceability,
             "summary": summary,
         }
 
@@ -1591,10 +1721,16 @@ class DiscoveryRepository:
         """Save datasource metadata and an encrypted source password."""
         query = text("""
             INSERT INTO demooc28.datasource_connections (
-                connection_name, database_type, host, port, database_name,
-                schema_name, username, ssl_enabled, credential_reference,
-                password_encrypted, is_active, discovery_status, created_by
+                tenant_id, connection_name, database_type, host, port,
+                database_name, schema_name, username, ssl_enabled,
+                credential_reference, password_encrypted, is_active,
+                discovery_status, created_by
             ) VALUES (
+                (
+                    SELECT tenant_id
+                    FROM demooc28.tenants
+                    WHERE tenant_code = 'DEFAULT'
+                ),
                 :connection_name, :database_type, :host, :port,
                 :database_name, :schema_name, :username, :ssl_enabled, NULL,
                 demooc28.pgp_sym_encrypt(
@@ -1603,7 +1739,7 @@ class DiscoveryRepository:
                 ),
                 TRUE, 'NOT_STARTED', :created_by
             )
-            RETURNING connection_id, connection_name, database_type, host,
+            RETURNING tenant_id, connection_id, connection_name, database_type, host,
                       port, database_name, schema_name, username, ssl_enabled,
                       is_active, discovery_status, last_discovered_at,
                       created_at, updated_at
@@ -1674,7 +1810,7 @@ class DiscoveryRepository:
 
     def list_datasource_connections(self) -> list[dict[str, Any]]:
         query = text("""
-            SELECT connection_id, connection_name, database_type, host, port,
+            SELECT tenant_id, connection_id, connection_name, database_type, host, port,
                    database_name, schema_name, username, ssl_enabled, is_active,
                    discovery_status, last_discovered_at, created_at, updated_at
             FROM demooc28.datasource_connections
@@ -1712,7 +1848,7 @@ class DiscoveryRepository:
             UPDATE demooc28.datasource_connections
             SET {assignments}
             WHERE connection_id = :connection_id
-            RETURNING connection_id, connection_name, database_type, host,
+            RETURNING tenant_id, connection_id, connection_name, database_type, host,
                       port, database_name, schema_name, username, ssl_enabled,
                       is_active, discovery_status, last_discovered_at,
                       created_at, updated_at
@@ -1734,6 +1870,202 @@ class DiscoveryRepository:
         with self.database.connect() as connection:
             result = connection.execute(query, {"connection_id": connection_id})
         return result.rowcount > 0
+
+    def save_collected_evidence(self, evidence: Any) -> dict[str, Any]:
+        """Persist one validated normalized evidence observation."""
+        payload = evidence.model_dump(mode="json") if hasattr(evidence, "model_dump") else dict(evidence)
+        principal = payload.pop("principal", {}) or {}
+        resource = payload.pop("resource", {}) or {}
+        observation = payload.pop("observation", {}) or {}
+        error = payload.pop("error", None)
+        raw_reference = payload.pop("raw_reference", {}) or {}
+        query = text("""
+            INSERT INTO demooc28.collected_evidence (
+                tenant_id, connection_id, discovery_run_id,
+                evidence_category, evidence_type, source_type, source_system,
+                collector_name, collector_version, principal_data,
+                resource_data, observation_data, collection_status,
+                collected_at, valid_until, raw_reference, error_data
+            ) VALUES (
+                :tenant_id, :connection_id, CAST(:discovery_run_id AS UUID),
+                :evidence_category, :evidence_type, :source_type, :source_system,
+                :collector_name, :collector_version,
+                CAST(:principal_data AS jsonb), CAST(:resource_data AS jsonb),
+                CAST(:observation_data AS jsonb), :collection_status,
+                :collected_at, :valid_until, CAST(:raw_reference AS jsonb),
+                CAST(:error_data AS jsonb)
+            ) RETURNING *
+        """)
+        params = {
+            **payload,
+            "principal_data": json.dumps(principal),
+            "resource_data": json.dumps(resource),
+            "observation_data": json.dumps(observation),
+            "raw_reference": json.dumps(raw_reference),
+            "error_data": json.dumps(error) if error is not None else None,
+        }
+        with self.database.connect() as connection:
+            row = connection.execute(query, params).mappings().one()
+        return dict(row)
+
+    def list_collected_evidence(
+        self,
+        run_id: UUID | str,
+        evidence_category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = text("""
+            SELECT * FROM demooc28.collected_evidence
+            WHERE discovery_run_id = CAST(:run_id AS UUID)
+              AND (
+                    CAST(:evidence_category AS VARCHAR(64)) IS NULL
+                    OR evidence_category = CAST(:evidence_category AS VARCHAR(64))
+                )
+            ORDER BY evidence_id
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(query, {
+                "run_id": str(run_id),
+                "evidence_category": evidence_category,
+            }).mappings().all()
+        return [dict(row) for row in rows]
+
+    def create_client_policy(self, policy: Any) -> dict[str, Any]:
+        """Persist one validated tenant policy."""
+        payload = policy.model_dump(mode="json") if hasattr(policy, "model_dump") else dict(policy)
+        payload["allowed_privileges"] = json.dumps(payload.get("allowed_privileges", []))
+        payload["conditions"] = json.dumps(payload.get("conditions", {}))
+        query = text("""
+            INSERT INTO demooc28.client_policies (
+                tenant_id, policy_code, policy_name, policy_type,
+                classification, sensitive_data_type, scope_type, connection_id,
+                catalog_name, schema_name, table_name, column_name,
+                principal_selector_type, principal_selector_value, effect,
+                allowed_privileges, conditions, priority, status,
+                effective_from, effective_to, approved_by, approved_at,
+                review_due_at
+            ) VALUES (
+                :tenant_id, :policy_code, :policy_name, :policy_type,
+                :classification, :sensitive_data_type, :scope_type, :connection_id,
+                :catalog_name, :schema_name, :table_name, :column_name,
+                :principal_selector_type, :principal_selector_value, :effect,
+                CAST(:allowed_privileges AS jsonb), CAST(:conditions AS jsonb),
+                :priority, :status, :effective_from, :effective_to,
+                :approved_by, :approved_at, :review_due_at
+            ) RETURNING *
+        """)
+        with self.database.connect() as connection:
+            row = connection.execute(query, payload).mappings().one()
+        return dict(row)
+
+    def list_client_policies(
+        self,
+        tenant_id: int,
+        policy_status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = text("""
+            SELECT * FROM demooc28.client_policies
+            WHERE tenant_id = :tenant_id
+              AND (
+                    CAST(:policy_status AS VARCHAR(32)) IS NULL
+                    OR status = CAST(:policy_status AS VARCHAR(32))
+                )
+            ORDER BY priority DESC, client_policy_id
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(query, {
+                "tenant_id": tenant_id,
+                "policy_status": policy_status,
+            }).mappings().all()
+        return [dict(row) for row in rows]
+
+    def create_principal_group(self, payload: Any) -> dict[str, Any]:
+        values = payload.model_dump(mode="json") if hasattr(payload, "model_dump") else dict(payload)
+        query = text("""
+            INSERT INTO demooc28.tenant_principal_groups (
+                tenant_id, group_code, group_name, description
+            ) VALUES (
+                :tenant_id, :group_code, :group_name, :description
+            ) RETURNING *
+        """)
+        with self.database.connect() as connection:
+            row = connection.execute(query, values).mappings().one()
+        return dict(row)
+
+    def add_principal_group_member(
+        self,
+        principal_group_id: int,
+        payload: Any,
+    ) -> dict[str, Any]:
+        values = payload.model_dump(mode="json") if hasattr(payload, "model_dump") else dict(payload)
+        values["principal_group_id"] = principal_group_id
+        query = text("""
+            INSERT INTO demooc28.tenant_principal_group_members (
+                principal_group_id, connection_id, principal_type,
+                principal_name, principal_source
+            ) VALUES (
+                :principal_group_id, :connection_id, :principal_type,
+                :principal_name, :principal_source
+            ) RETURNING *
+        """)
+        with self.database.connect() as connection:
+            row = connection.execute(query, values).mappings().one()
+        return dict(row)
+
+    def resolve_access_policy_context(
+        self,
+        run_id: UUID | str,
+        classification: str = "PHI",
+    ) -> list[dict[str, Any]]:
+        """Resolve active access policies and expand principal groups."""
+        query = text("""
+            SELECT
+                policy.*,
+                datasource.connection_id AS evaluated_connection_id,
+                principal_group.principal_group_id,
+                COALESCE(
+                    jsonb_agg(
+                        DISTINCT member.principal_name
+                    ) FILTER (
+                        WHERE member.principal_name IS NOT NULL
+                          AND (
+                              member.connection_id IS NULL
+                              OR member.connection_id = datasource.connection_id
+                          )
+                    ),
+                    '[]'::jsonb
+                ) AS principal_names
+            FROM demooc28.discovery_runs AS run
+            JOIN demooc28.datasource_connections AS datasource
+              ON datasource.connection_id = run.connection_id
+            JOIN demooc28.client_policies AS policy
+              ON policy.tenant_id = datasource.tenant_id
+             AND policy.policy_type = 'DATA_ACCESS'
+             AND policy.status = 'ACTIVE'
+             AND (policy.effective_from IS NULL
+                  OR policy.effective_from <= CURRENT_DATE)
+             AND (policy.effective_to IS NULL
+                  OR policy.effective_to >= CURRENT_DATE)
+             AND (policy.classification IS NULL
+                  OR policy.classification = :classification)
+             AND (policy.connection_id IS NULL
+                  OR policy.connection_id = datasource.connection_id)
+            LEFT JOIN demooc28.tenant_principal_groups AS principal_group
+              ON policy.principal_selector_type = 'CLIENT_PRINCIPAL_GROUP'
+             AND principal_group.tenant_id = policy.tenant_id
+             AND principal_group.group_code = policy.principal_selector_value
+            LEFT JOIN demooc28.tenant_principal_group_members AS member
+              ON member.principal_group_id = principal_group.principal_group_id
+            WHERE run.discovery_run_id = CAST(:run_id AS UUID)
+            GROUP BY policy.client_policy_id, datasource.connection_id,
+                     principal_group.principal_group_id
+            ORDER BY policy.priority DESC, policy.client_policy_id
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(query, {
+                "run_id": str(run_id),
+                "classification": classification,
+            }).mappings().all()
+        return [dict(row) for row in rows]
 
     def get_overview(self, run_id: UUID | str) -> dict[str, Any]:
         base_query = text("""
@@ -2107,6 +2439,42 @@ class DiscoveryRepository:
             WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
             ORDER BY assessment.assessment_id, result.control_code
         """)
+        trace_query = text("""
+            SELECT
+                result.control_result_id,
+                COALESCE(
+                    jsonb_agg(DISTINCT policy_link.client_policy_id)
+                    FILTER (
+                        WHERE policy_link.client_policy_id IS NOT NULL
+                    ),
+                    '[]'::jsonb
+                ) AS applied_policy_ids,
+                COALESCE(
+                    jsonb_agg(
+                        DISTINCT jsonb_build_object(
+                            'evidence_id', evidence_link.evidence_id,
+                            'usage_type', evidence_link.usage_type,
+                            'principal', evidence.principal_data,
+                            'resource', evidence.resource_data,
+                            'observation', evidence.observation_data
+                        )
+                    ) FILTER (
+                        WHERE evidence_link.evidence_id IS NOT NULL
+                    ),
+                    '[]'::jsonb
+                ) AS linked_evidence
+            FROM demooc28.compliance_control_results AS result
+            JOIN demooc28.compliance_assessments AS assessment
+              ON assessment.assessment_id = result.assessment_id
+            LEFT JOIN demooc28.control_policy_links AS policy_link
+              ON policy_link.control_result_id = result.control_result_id
+            LEFT JOIN demooc28.control_evidence_links AS evidence_link
+              ON evidence_link.control_result_id = result.control_result_id
+            LEFT JOIN demooc28.collected_evidence AS evidence
+              ON evidence.evidence_id = evidence_link.evidence_id
+            WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
+            GROUP BY result.control_result_id
+        """)
         findings_query = text("""
             SELECT
                 finding.compliance_finding_id,
@@ -2152,6 +2520,33 @@ class DiscoveryRepository:
                 ).mappings().all()
             ]
             controls = [dict(row) for row in connection.execute(controls_query, params).mappings().all()]
+            trace_rows = [
+                dict(row)
+                for row in connection.execute(
+                    trace_query, params
+                ).mappings().all()
+            ]
+        trace_by_control = {
+            int(row["control_result_id"]): row
+            for row in trace_rows
+        }
+        for control in controls:
+            trace = trace_by_control.get(
+                int(control["control_result_id"]), {}
+            )
+            control["applied_policy_ids"] = trace.get(
+                "applied_policy_ids", []
+            )
+            linked = trace.get("linked_evidence", [])
+            control["linked_evidence"] = linked
+            control["allowed_evidence"] = [
+                item for item in linked
+                if item.get("usage_type") == "SUPPORTING"
+            ]
+            control["violating_evidence"] = [
+                item for item in linked
+                if item.get("usage_type") == "CONFLICTING"
+            ]
         findings_by_assessment: dict[int, list[dict[str, Any]]] = {}
         for finding in findings:
             findings_by_assessment.setdefault(
