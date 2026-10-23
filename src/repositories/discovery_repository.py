@@ -17,7 +17,7 @@ DISCOVERY_STAGES = [
     "COLUMN_CLASSIFICATION",
     "DEPENDENCY_MAPPING",
     "REGULATORY_COMPLIANCE",
-    "HIPAA_COMPLIANCE",
+    # "HIPAA_COMPLIANCE",
     "REPORT_FINALIZATION",
 ]
 
@@ -184,18 +184,69 @@ class DiscoveryRepository:
                 },
             )
 
+    # def create_run_stages(
+    #     self,
+    #     run_id: UUID,
+    #     effective_scopes: list[str],
+    # ) -> None:
+    #     """Create all workflow stages and timestamp skipped stages."""
+    #     effective_scope_set = set(effective_scopes)
+    #     stage_scope_mapping = {
+    #         "COLUMN_CLASSIFICATION": "COLUMN_CLASSIFICATION",
+    #         "DEPENDENCY_MAPPING": "DEPENDENCY_MAP",
+    #         "REGULATORY_COMPLIANCE": "REGULATORY_COMPLIANCE",
+    #         # "HIPAA_COMPLIANCE": "HIPAA_COMPLIANCE",
+    #     }
+    #     query = text("""
+    #         INSERT INTO demooc28.discovery_run_stages (
+    #             discovery_run_id,
+    #             stage_name,
+    #             stage_status,
+    #             message,
+    #             completed_at
+    #         ) VALUES (
+    #             CAST(:run_id AS UUID),
+    #             CAST(:stage_name AS VARCHAR(64)),
+    #             CAST(:stage_status AS VARCHAR(32)),
+    #             CAST(:message AS TEXT),
+    #             CASE
+    #                 WHEN CAST(:is_skipped AS BOOLEAN)
+    #                 THEN CURRENT_TIMESTAMP
+    #                 ELSE NULL
+    #             END
+    #         )
+    #         ON CONFLICT (discovery_run_id, stage_name) DO NOTHING
+    #     """)
+    #     with self.database.connect() as connection:
+    #         for stage_name in DISCOVERY_STAGES:
+    #             required_scope = stage_scope_mapping.get(stage_name)
+    #             is_skipped = bool(
+    #                 required_scope
+    #                 and required_scope not in effective_scope_set
+    #             )
+    #             stage_status = "SKIPPED" if is_skipped else "PENDING"
+    #             message = "Stage not requested" if is_skipped else "Waiting to start"
+    #             connection.execute(
+    #                 query,
+    #                 {
+    #                     "run_id": str(run_id),
+    #                     "stage_name": stage_name,
+    #                     "stage_status": stage_status,
+    #                     "message": message,
+    #                     "is_skipped": is_skipped,
+    #                 },
+    #             )
     def create_run_stages(
         self,
         run_id: UUID,
         effective_scopes: list[str],
     ) -> None:
-        """Create all workflow stages and timestamp skipped stages."""
+        """Create all active workflow stages and timestamp skipped stages."""
         effective_scope_set = set(effective_scopes)
         stage_scope_mapping = {
             "COLUMN_CLASSIFICATION": "COLUMN_CLASSIFICATION",
             "DEPENDENCY_MAPPING": "DEPENDENCY_MAP",
             "REGULATORY_COMPLIANCE": "REGULATORY_COMPLIANCE",
-            "HIPAA_COMPLIANCE": "HIPAA_COMPLIANCE",
         }
         query = text("""
             INSERT INTO demooc28.discovery_run_stages (
@@ -1735,7 +1786,58 @@ class DiscoveryRepository:
             result = connection.execute(query, {"connection_id": connection_id})
         return result.rowcount > 0
 
+    # def get_overview(self, run_id: UUID | str) -> dict[str, Any]:
+    #     base_query = text("""
+    #         SELECT
+    #           (SELECT COUNT(*) FROM demooc28.discovered_objects
+    #            WHERE discovery_run_id = CAST(:run_id AS UUID)
+    #              AND object_type = 'TABLE') AS tables_scanned,
+    #           (SELECT COUNT(*) FROM demooc28.discovered_columns
+    #            WHERE discovery_run_id = CAST(:run_id AS UUID)) AS total_columns,
+    #           (SELECT COUNT(*) FROM demooc28.dependency_edges
+    #            WHERE discovery_run_id = CAST(:run_id AS UUID)) AS dependency_count,
+    #           (SELECT COUNT(*) FROM demooc28.column_classifications
+    #            WHERE discovery_run_id = CAST(:run_id AS UUID)
+    #              AND needs_human_review = TRUE)
+    #              AS classifications_needing_review,
+    #           (SELECT COUNT(*) FROM demooc28.hipaa_findings
+    #            WHERE discovery_run_id = CAST(:run_id AS UUID)
+    #              AND needs_human_review = TRUE)
+    #              AS hipaa_findings_needing_review
+    #     """)
+    #     classification_query = text("""
+    #         SELECT display_classification, COUNT(*) AS classification_count
+    #         FROM demooc28.column_classifications
+    #         WHERE discovery_run_id = CAST(:run_id AS UUID)
+    #         GROUP BY display_classification
+    #     """)
+    #     score_query = text("""
+    #         SELECT score, risk_band, phi_columns_checked, severity_counts,
+    #                policy_version, calculated_at
+    #         FROM demooc28.hipaa_scores
+    #         WHERE discovery_run_id = CAST(:run_id AS UUID)
+    #     """)
+    #     params = {"run_id": str(run_id)}
+    #     with self.database.connect() as connection:
+    #         base = dict(connection.execute(base_query, params).mappings().one())
+    #         classifications = connection.execute(
+    #             classification_query, params
+    #         ).mappings().all()
+    #         score = connection.execute(
+    #             score_query, params
+    #         ).mappings().one_or_none()
+    #     counts = {
+    #         key: 0 for key in ("PUBLIC", "PII", "PHI", "FINANCIAL", "SENSITIVE")
+    #     }
+    #     for row in classifications:
+    #         counts[row["display_classification"]] = int(row["classification_count"])
+    #     return {
+    #         **base,
+    #         "classification_counts": counts,
+    #         "hipaa_score": dict(score) if score else None,
+    #     }
     def get_overview(self, run_id: UUID | str) -> dict[str, Any]:
+        """Return high-level summary statistics for a discovery run."""
         base_query = text("""
             SELECT
               (SELECT COUNT(*) FROM demooc28.discovered_objects
@@ -1749,10 +1851,12 @@ class DiscoveryRepository:
                WHERE discovery_run_id = CAST(:run_id AS UUID)
                  AND needs_human_review = TRUE)
                  AS classifications_needing_review,
-              (SELECT COUNT(*) FROM demooc28.hipaa_findings
-               WHERE discovery_run_id = CAST(:run_id AS UUID)
-                 AND needs_human_review = TRUE)
-                 AS hipaa_findings_needing_review
+              (SELECT COUNT(*) FROM demooc28.compliance_findings AS finding
+               JOIN demooc28.compliance_assessments AS assessment
+                 ON assessment.assessment_id = finding.assessment_id
+               WHERE assessment.discovery_run_id = CAST(:run_id AS UUID)
+                 AND finding.needs_human_review = TRUE)
+                 AS compliance_findings_needing_review
         """)
         classification_query = text("""
             SELECT display_classification, COUNT(*) AS classification_count
@@ -1760,36 +1864,51 @@ class DiscoveryRepository:
             WHERE discovery_run_id = CAST(:run_id AS UUID)
             GROUP BY display_classification
         """)
-        score_query = text("""
-            SELECT score, risk_band, phi_columns_checked, severity_counts,
-                   policy_version, calculated_at
-            FROM demooc28.hipaa_scores
-            WHERE discovery_run_id = CAST(:run_id AS UUID)
-        """)
         params = {"run_id": str(run_id)}
         with self.database.connect() as connection:
             base = dict(connection.execute(base_query, params).mappings().one())
             classifications = connection.execute(
                 classification_query, params
             ).mappings().all()
-            score = connection.execute(
-                score_query, params
-            ).mappings().one_or_none()
+
         counts = {
             key: 0 for key in ("PUBLIC", "PII", "PHI", "FINANCIAL", "SENSITIVE")
         }
         for row in classifications:
             counts[row["display_classification"]] = int(row["classification_count"])
+
         return {
             **base,
             "classification_counts": counts,
-            "hipaa_score": dict(score) if score else None,
         }
+
+    # def get_table_profiles_result(
+    #     self, run_id: UUID | str
+    # ) -> list[dict[str, Any]]:
+    #     query = text("""
+    #         SELECT obj.object_id, obj.schema_name,
+    #                obj.object_name AS table_name, obj.object_type,
+    #                prof.table_profile_id, prof.row_count, prof.column_count,
+    #                prof.average_null_percentage, prof.profiling_method,
+    #                prof.profile_metadata, prof.created_at, prof.updated_at
+    #         FROM demooc28.discovered_objects AS obj
+    #         JOIN demooc28.table_profiles AS prof
+    #           ON prof.object_id = obj.object_id
+    #          AND prof.discovery_run_id = obj.discovery_run_id
+    #         WHERE obj.discovery_run_id = CAST(:run_id AS UUID)
+    #         ORDER BY obj.schema_name, obj.object_name
+    #     """)
+    #     with self.database.connect() as connection:
+    #         rows = connection.execute(
+    #             query, {"run_id": str(run_id)}
+    #         ).mappings().all()
+    #     return [dict(row) for row in rows]
 
     def get_table_profiles_result(
         self, run_id: UUID | str
     ) -> list[dict[str, Any]]:
-        query = text("""
+        """Return table profiles enriched with column-level distinct counts."""
+        table_query = text("""
             SELECT obj.object_id, obj.schema_name,
                    obj.object_name AS table_name, obj.object_type,
                    prof.table_profile_id, prof.row_count, prof.column_count,
@@ -1802,12 +1921,39 @@ class DiscoveryRepository:
             WHERE obj.discovery_run_id = CAST(:run_id AS UUID)
             ORDER BY obj.schema_name, obj.object_name
         """)
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                query, {"run_id": str(run_id)}
-            ).mappings().all()
-        return [dict(row) for row in rows]
 
+        column_query = text("""
+            SELECT col.object_id, col.column_name, col.data_type,
+                   cp.distinct_count, cp.distinct_count_is_approximate,
+                   cp.null_percentage
+            FROM demooc28.column_profiles AS cp
+            JOIN demooc28.discovered_columns AS col
+              ON col.column_id = cp.column_id
+            WHERE cp.discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY col.ordinal_position
+        """)
+
+        params = {"run_id": str(run_id)}
+        with self.database.connect() as connection:
+            tables = [dict(row) for row in connection.execute(table_query, params).mappings().all()]
+            columns = [dict(row) for row in connection.execute(column_query, params).mappings().all()]
+
+        # Group column-level distinct counts by table object_id
+        columns_by_object: dict[int, list[dict[str, Any]]] = {}
+        for col in columns:
+            columns_by_object.setdefault(col["object_id"], []).append({
+                "column_name": col["column_name"],
+                "data_type": col["data_type"],
+                "distinct_count": col["distinct_count"],
+                "distinct_count_is_approximate": col["distinct_count_is_approximate"],
+                "null_percentage": col["null_percentage"],
+            })
+
+        # Embed column profiles into parent table payload
+        for table in tables:
+            table["column_profiles"] = columns_by_object.get(table["object_id"], [])
+
+        return tables
     def get_classifications_result(
         self, run_id: UUID | str
     ) -> list[dict[str, Any]]:

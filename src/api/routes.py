@@ -58,18 +58,47 @@ def _safe_config(
     return config
 
 
-def _effective_scopes(requested_scopes: list[str]) -> list[str]:
+# After
+# def _effective_scopes(requested_scopes: list[str]) -> list[str]:
+#     """Add internal workflow dependencies required for execution."""
+#     effective_scopes = set(requested_scopes)
+
+#     if "REGULATORY_COMPLIANCE" in effective_scopes:
+#         effective_scopes.add("COLUMN_CLASSIFICATION")
+
+#     return sorted(effective_scopes)
+# def _effective_scopes(
+#     requested_scopes: list[str],
+#     selected_frameworks: list[str] | None = None,
+# ) -> list[str]:
+#     """Add internal workflow dependencies required for execution."""
+#     effective_scopes = set(requested_scopes)
+
+#     # Auto-enable compliance and classification when frameworks are selected
+#     if selected_frameworks or "REGULATORY_COMPLIANCE" in effective_scopes:
+#         effective_scopes.add("COLUMN_CLASSIFICATION")
+#         effective_scopes.add("REGULATORY_COMPLIANCE")
+
+#     return sorted(effective_scopes)
+
+# +++ AFTER +++
+def _effective_scopes(
+    requested_scopes: list[str],
+    selected_frameworks: list[str] | None = None,
+) -> list[str]:
     """Add internal workflow dependencies required for execution."""
     effective_scopes = set(requested_scopes)
 
+    # When compliance or frameworks are requested, activate both classification and compliance
     if (
-        "HIPAA_COMPLIANCE" in effective_scopes
+        selected_frameworks
         or "REGULATORY_COMPLIANCE" in effective_scopes
+        or "HIPAA_COMPLIANCE" in effective_scopes
     ):
         effective_scopes.add("COLUMN_CLASSIFICATION")
+        effective_scopes.add("REGULATORY_COMPLIANCE")
 
     return sorted(effective_scopes)
-
 
 def _get_repository(database: MetadataDatabase) -> DiscoveryRepository:
     return DiscoveryRepository(database)
@@ -434,47 +463,75 @@ def start_discovery_run(
             },
         )
 
+    # requested_scopes = [scope.value for scope in request.scopes]
+    # effective_scopes = _effective_scopes(requested_scopes)
+    # selected_frameworks = list(request.selected_frameworks)
+    # # if (
+    # #     "HIPAA_COMPLIANCE" in requested_scopes
+    # #     and "HIPAA" not in selected_frameworks
+    # # ):
+    # #     selected_frameworks.append("HIPAA")
+    # if selected_frameworks:
+    #     validation = repository.validate_selected_frameworks(
+    #         selected_frameworks
+    #     )
+    #     if validation["unknown"]:
+    #         raise HTTPException(
+    #             status_code=status.HTTP_400_BAD_REQUEST,
+    #             detail={
+    #                 "error_code": "UNKNOWN_COMPLIANCE_FRAMEWORK",
+    #                 "message": "One or more framework codes are unknown.",
+    #                 "frameworks": validation["unknown"],
+    #             },
+    #         )
+    #     if validation["unavailable"]:
+    #         raise HTTPException(
+    #             status_code=status.HTTP_400_BAD_REQUEST,
+    #             detail={
+    #                 "error_code": "COMPLIANCE_FRAMEWORK_NOT_AVAILABLE",
+    #                 "message": (
+    #                     "One or more selected policy packs are not yet "
+    #                     "available for assessment."
+    #                 ),
+    #                 "frameworks": validation["unavailable"],
+    #             },
+    #         )
+    #     selected_frameworks = validation["available"]
+    # run_id = uuid4()
+
+    # +++ AFTER +++
     requested_scopes = [scope.value for scope in request.scopes]
-    effective_scopes = _effective_scopes(requested_scopes)
     selected_frameworks = list(request.selected_frameworks)
-    if (
-        "HIPAA_COMPLIANCE" in requested_scopes
-        and "HIPAA" not in selected_frameworks
-    ):
-        selected_frameworks.append("HIPAA")
+
+    # Validate selected frameworks against the new Stage 4 engine
+    from src.policies.compliance_mapping import FRAMEWORK_SCOPES
+    supported_frameworks = set(FRAMEWORK_SCOPES.keys())
+
     if selected_frameworks:
-        validation = repository.validate_selected_frameworks(
-            selected_frameworks
-        )
-        if validation["unknown"]:
+        unknown = [
+            fw for fw in selected_frameworks
+            if fw.upper().strip() not in supported_frameworks
+        ]
+        if unknown:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "error_code": "UNKNOWN_COMPLIANCE_FRAMEWORK",
-                    "message": "One or more framework codes are unknown.",
-                    "frameworks": validation["unknown"],
-                },
-            )
-        if validation["unavailable"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "COMPLIANCE_FRAMEWORK_NOT_AVAILABLE",
                     "message": (
-                        "One or more selected policy packs are not yet "
-                        "available for assessment."
+                        f"Unsupported framework(s): {', '.join(unknown)}. "
+                        f"Supported: {', '.join(sorted(supported_frameworks))}"
                     ),
-                    "frameworks": validation["unavailable"],
                 },
             )
-        selected_frameworks = validation["available"]
+
+    effective_scopes = _effective_scopes(requested_scopes, selected_frameworks)
     run_id = uuid4()
 
     selected_objects = [
         selected_object.model_dump()
         for selected_object in request.selected_objects
     ]
-
+    
     repository.create_run(
         run_id=run_id,
         connection_id=request.connection_id,
@@ -587,14 +644,34 @@ def get_focused_dependencies(
     }
 
 
+# @router.get("/discovery-runs/{run_id}/compliance-results")
+# def get_compliance_results(
+#     run_id: UUID,
+#     database: MetadataDatabase = Depends(get_database),
+# ) -> dict[str, Any]:
+#     repository = _get_repository(database)
+#     _require_discovery_run(repository, run_id)
+#     results = repository.get_compliance_results(run_id)
+#     return {
+#         "discovery_run_id": str(run_id),
+#         "framework_count": len(results),
+#         "frameworks": results,
+#     }
+
+# +++ AFTER +++
 @router.get("/discovery-runs/{run_id}/compliance-results")
 def get_compliance_results(
     run_id: UUID,
     database: MetadataDatabase = Depends(get_database),
 ) -> dict[str, Any]:
+    from src.repositories.compliance_repository import ComplianceRepository
+
     repository = _get_repository(database)
     _require_discovery_run(repository, run_id)
-    results = repository.get_compliance_results(run_id)
+
+    comp_repo = ComplianceRepository(database)
+    results = comp_repo.get_compliance_results(run_id)
+
     return {
         "discovery_run_id": str(run_id),
         "framework_count": len(results),
@@ -602,64 +679,64 @@ def get_compliance_results(
     }
 
 
-@router.get("/compliance-assessments/{assessment_id}/control-evidence")
-def get_control_evidence(
-    assessment_id: int,
-    database: MetadataDatabase = Depends(get_database),
-) -> dict[str, Any]:
-    if assessment_id <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="assessment_id must be greater than zero",
-        )
-    evidence = _get_repository(database).list_control_evidence(assessment_id)
-    return {
-        "assessment_id": assessment_id,
-        "evidence_count": len(evidence),
-        "evidence": evidence,
-    }
+# @router.get("/compliance-assessments/{assessment_id}/control-evidence")
+# def get_control_evidence(
+#     assessment_id: int,
+#     database: MetadataDatabase = Depends(get_database),
+# ) -> dict[str, Any]:
+#     if assessment_id <= 0:
+#         raise HTTPException(
+#             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+#             detail="assessment_id must be greater than zero",
+#         )
+#     evidence = _get_repository(database).list_control_evidence(assessment_id)
+#     return {
+#         "assessment_id": assessment_id,
+#         "evidence_count": len(evidence),
+#         "evidence": evidence,
+#     }
 
 
-@router.put(
-    "/compliance-assessments/{assessment_id}/controls/{control_code}/evidence"
-)
-def submit_control_evidence(
-    assessment_id: int,
-    control_code: str,
-    request: ControlEvidenceInput,
-    database: MetadataDatabase = Depends(get_database),
-) -> dict[str, Any]:
-    repository = _get_repository(database)
-    payload = request.model_dump(mode="json")
-    payload["verification_status"] = request.verification_status.value
-    try:
-        evidence = repository.upsert_control_evidence(
-            assessment_id=assessment_id,
-            control_code=control_code.strip().upper(),
-            payload=payload,
-        )
-    except ValueError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "COMPLIANCE_CONTROL_NOT_FOUND",
-                "message": str(error),
-            },
-        ) from error
-    return {
-        "message": "Evidence saved and assessment recalculated.",
-        "evidence": evidence,
-    }
+# @router.put(
+#     "/compliance-assessments/{assessment_id}/controls/{control_code}/evidence"
+# )
+# def submit_control_evidence(
+#     assessment_id: int,
+#     control_code: str,
+#     request: ControlEvidenceInput,
+#     database: MetadataDatabase = Depends(get_database),
+# ) -> dict[str, Any]:
+#     repository = _get_repository(database)
+#     payload = request.model_dump(mode="json")
+#     payload["verification_status"] = request.verification_status.value
+#     try:
+#         evidence = repository.upsert_control_evidence(
+#             assessment_id=assessment_id,
+#             control_code=control_code.strip().upper(),
+#             payload=payload,
+#         )
+#     except ValueError as error:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND,
+#             detail={
+#                 "error_code": "COMPLIANCE_CONTROL_NOT_FOUND",
+#                 "message": str(error),
+#             },
+#         ) from error
+#     return {
+#         "message": "Evidence saved and assessment recalculated.",
+#         "evidence": evidence,
+#     }
 
 
-@router.get("/discovery-runs/{run_id}/hipaa-findings")
-def get_hipaa_findings(
-    run_id: UUID,
-    database: MetadataDatabase = Depends(get_database),
-) -> dict[str, Any]:
-    repository = _get_repository(database)
-    _require_discovery_run(repository, run_id)
-    return repository.get_hipaa_result(run_id)
+# @router.get("/discovery-runs/{run_id}/hipaa-findings")
+# def get_hipaa_findings(
+#     run_id: UUID,
+#     database: MetadataDatabase = Depends(get_database),
+# ) -> dict[str, Any]:
+#     repository = _get_repository(database)
+#     _require_discovery_run(repository, run_id)
+#     return repository.get_hipaa_result(run_id)
 
 
 @router.get("/discovery-runs/{run_id}/export")
@@ -669,6 +746,10 @@ def export_discovery_run(
 ) -> JSONResponse:
     repository = _get_repository(database)
     run = _require_discovery_run(repository, run_id)
+    # +++ AFTER +++
+    from src.repositories.compliance_repository import ComplianceRepository
+    comp_repo = ComplianceRepository(database)
+
     payload = {
         "run": run,
         "stages": repository.get_run_stages(run_id),
@@ -676,7 +757,7 @@ def export_discovery_run(
         "table_profiles": repository.get_table_profiles_result(run_id),
         "classifications": repository.get_classifications_result(run_id),
         "dependencies": repository.get_dependencies_result(run_id),
-        "hipaa": repository.get_hipaa_result(run_id),
+        "compliance": comp_repo.get_compliance_results(run_id),
     }
 
     return JSONResponse(
