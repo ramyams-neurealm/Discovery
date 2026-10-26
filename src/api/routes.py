@@ -678,6 +678,39 @@ def get_compliance_results(
         "frameworks": results,
     }
 
+# @router.get("/discovery-runs/{run_id}/compliance-results")
+# def get_compliance_results(
+#     run_id: UUID,
+#     database: MetadataDatabase = Depends(get_database),
+# ) -> dict[str, Any]:
+#     import traceback
+#     try:
+#         from src.repositories.compliance_repository import ComplianceRepository
+
+#         repository = _get_repository(database)
+#         _require_discovery_run(repository, run_id)
+
+#         comp_repo = ComplianceRepository(database)
+#         results = comp_repo.get_compliance_results(run_id)
+
+#         return {
+#             "discovery_run_id": str(run_id),
+#             "framework_count": len(results),
+#             "frameworks": results,
+#         }
+#     except Exception as exc:
+#         print("\n" + "=" * 50)
+#         print("EXACT ERROR IN /compliance-results:")
+#         traceback.print_exc()
+#         print("=" * 50 + "\n")
+#         raise HTTPException(
+#             status_code=500,
+#             detail={
+#                 "error_type": exc.__class__.__name__,
+#                 "error_message": str(exc),
+#                 "traceback": traceback.format_exc().splitlines()[-4:],
+#             },
+#         )
 
 # @router.get("/compliance-assessments/{assessment_id}/control-evidence")
 # def get_control_evidence(
