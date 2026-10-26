@@ -6,23 +6,36 @@ class DiscoveryState(TypedDict, total=False):
     connection_id: int
     requested_scopes: list[str]
     effective_scopes: list[str]
+    selected_objects: list[dict[str, str]]
+    selected_frameworks: list[str]
     source_connection: Any
-
-    objects: list[dict]
-    table_profiles: list[dict]
-    column_profiles: list[dict]
-
+    objects: list[dict[str, Any]]
+    table_profiles: list[dict[str, Any]]
+    column_profiles: list[dict[str, Any]]
     classifications: list[Any]
-    classification_records: list[dict]
-
+    classification_records: list[dict[str, Any]]
+    classification_summary: dict[str, Any]
     dependencies: list[Any]
-    dependency_records: list[dict]
-
+    dependency_records: list[dict[str, Any]]
     hipaa_findings: list[Any]
-    hipaa_finding_records: list[dict]
+    hipaa_finding_records: list[dict[str, Any]]
     hipaa_score: Any
     hipaa_score_id: int
-
-    report: dict
-    errors: list[dict]
+    gdpr_findings: list[Any]
+    gdpr_score: Any
+    pci_dss_findings: list[Any]
+    pci_dss_score: Any
+    glba_findings: list[Any]
+    glba_score: Any
+    dpdp_findings: list[Any]
+    dpdp_score: Any
+    ccpa_findings: list[Any]
+    ccpa_score: Any
+    pipeda_findings: list[Any]
+    pipeda_score: Any
+    findings: list[Any]
+    compliance_findings: list[Any]
+    compliance_scores: dict[str, Any]
+    report: dict[str, Any]
+    errors: list[dict[str, Any]]
     status: str

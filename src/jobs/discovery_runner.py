@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from uuid import UUID
 
 from src.agents.classification_agent import (
@@ -147,13 +148,11 @@ def run_discovery_background(
                 .get_secret_value()
             )
 
-            password = (
-                repository.get_datasource_password(
-                    connection_id=(
-                        datasource["connection_id"]
-                    ),
-                    encryption_key=encryption_key,
-                )
+            password = repository.get_datasource_password(
+                connection_id=(
+                    datasource["connection_id"]
+                ),
+                encryption_key=encryption_key,
             )
 
         except Exception as error:
@@ -306,33 +305,25 @@ def run_discovery_background(
         # Create Discovery components
         # ========================================================
 
-        metadata_agent = (
-            MetadataDiscoveryProfilingAgent(
-                settings=settings,
-                key_vault=key_vault,
-                repository=repository,
-            )
+        metadata_agent = MetadataDiscoveryProfilingAgent(
+            settings=settings,
+            key_vault=key_vault,
+            repository=repository,
         )
 
-        classification_agent = (
-            DataClassificationAgent(
-                settings=settings,
-                key_vault=key_vault,
-            )
+        classification_agent = DataClassificationAgent(
+            settings=settings,
+            key_vault=key_vault,
         )
 
-        dependency_agent = (
-            DependencyMappingAgent(
-                settings=settings,
-                key_vault=key_vault,
-            )
+        dependency_agent = DependencyMappingAgent(
+            settings=settings,
+            key_vault=key_vault,
         )
 
-        hipaa_agent = (
-            HipaaComplianceScoreAgent(
-                settings=settings,
-                key_vault=key_vault,
-            )
+        hipaa_agent = HipaaComplianceScoreAgent(
+            settings=settings,
+            key_vault=key_vault,
         )
 
         report_agent = ReportGenerationAgent()
@@ -350,74 +341,232 @@ def run_discovery_background(
             hipaa_agent=hipaa_agent,
             report_agent=report_agent,
             repository=repository,
+            settings=settings,
+            key_vault=key_vault,
         )
+
+        # ========================================================
+        # Load run configuration
+        # ========================================================
 
         requested_scopes = list(
             run.get("requested_scopes") or []
         )
+
+        effective_scopes = list(
+            run.get("effective_scopes")
+            or requested_scopes
+        )
+
         selected_objects = list(
             run.get("selected_objects") or []
         )
+
         selected_frameworks = list(
             run.get("selected_frameworks") or []
+        )
+
+        # ========================================================
+        # Validate the selected object configuration
+        # ========================================================
+
+        invalid_selected_objects = [
+            selected_object
+            for selected_object in selected_objects
+            if not isinstance(selected_object, dict)
+            or not selected_object.get("object_name")
+            or not selected_object.get("object_type")
+        ]
+
+        if invalid_selected_objects:
+            raise ValueError(
+                "One or more selected objects do not contain "
+                "object_name and object_type."
+            )
+
+        # ========================================================
+        # Log non-secret workflow configuration
+        # ========================================================
+
+        logger.info(
+            "Starting Discovery supervisor",
+            extra={
+                "discovery_run_id": run_id,
+                "connection_id": (
+                    datasource["connection_id"]
+                ),
+                "requested_scopes": requested_scopes,
+                "effective_scopes": effective_scopes,
+                "selected_object_count": len(
+                    selected_objects
+                ),
+                "selected_objects": [
+                    {
+                        "object_name": (
+                            selected_object.get(
+                                "object_name"
+                            )
+                        ),
+                        "object_type": (
+                            selected_object.get(
+                                "object_type"
+                            )
+                        ),
+                    }
+                    for selected_object
+                    in selected_objects
+                ],
+                "selected_framework_count": len(
+                    selected_frameworks
+                ),
+                "selected_frameworks": (
+                    selected_frameworks
+                ),
+            },
         )
 
         # ========================================================
         # Execute Discovery workflow
         # ========================================================
 
-        supervisor.invoke(
-            discovery_run_id=run_id,
-            connection_id=datasource[
-                "connection_id"
-            ],
-            scopes=requested_scopes,
-            source_connection=source_connector,
-            selected_objects=selected_objects,
-            selected_frameworks=selected_frameworks,
+        workflow_started_at = perf_counter()
+
+        try:
+            supervisor.invoke(
+                discovery_run_id=run_id,
+                connection_id=datasource[
+                    "connection_id"
+                ],
+                scopes=effective_scopes,
+                source_connection=source_connector,
+                selected_objects=selected_objects,
+                selected_frameworks=(
+                    selected_frameworks
+                ),
+            )
+
+        finally:
+            workflow_duration_seconds = round(
+                perf_counter()
+                - workflow_started_at,
+                3,
+            )
+
+            logger.info(
+                "Discovery supervisor execution finished",
+                extra={
+                    "discovery_run_id": run_id,
+                    "workflow_duration_seconds": (
+                        workflow_duration_seconds
+                    ),
+                    "selected_object_count": len(
+                        selected_objects
+                    ),
+                    "selected_framework_count": len(
+                        selected_frameworks
+                    ),
+                },
+            )
+
+        # ========================================================
+        # Mark report finalization as completed
+        # ========================================================
+
+        repository.update_stage(
+            run_id=run_id,
+            stage_name="REPORT_FINALIZATION",
+            stage_status="COMPLETED",
+            message="Discovery run completed",
+            processed_items=1,
+            total_items=1,
+            error_code=None,
+            error_message=None,
+        )
+
+        # ========================================================
+        # Mark overall run as succeeded
+        # ========================================================
+
+        repository.update_run_status(
+            run_id=run_id,
+            status="SUCCEEDED",
+            current_stage="REPORT_FINALIZATION",
+            progress_percentage=100.0,
+            error_code=None,
+            error_message=None,
         )
 
     except Exception as error:
-        if settings.app_env in {
-            "local",
-            "development",
-        }:
-            logger.exception(
-                "Discovery run failed",
-                extra={
-                    "discovery_run_id": run_id,
-                },
-            )
-        else:
+        logger.exception(
+            "Discovery run failed: %s",
+            error,
+            extra={
+                "discovery_run_id": run_id,
+            },
+        )
+
+        error_message = str(error)
+        current = None
+
+        try:
+            current = repository.get_run(run_id)
+
+        except Exception:
             logger.error(
-                "Discovery run failed: %s",
-                error.__class__.__name__,
+                (
+                    "Could not reload discovery run "
+                    "after task failure"
+                ),
+                exc_info=True,
                 extra={
                     "discovery_run_id": run_id,
                 },
             )
 
-        current = repository.get_run(run_id)
+        current_stage = (
+            current.get("current_stage")
+            if current
+            else None
+        )
 
-        if (
-            current is not None
-            and current.get("status") != "FAILED"
-        ):
+        progress_percentage = (
+            current.get("progress_percentage")
+            if current
+            else None
+        )
+
+        try:
+            if current_stage:
+                repository.update_stage(
+                    run_id=run_id,
+                    stage_name=current_stage,
+                    stage_status="FAILED",
+                    message="Discovery run failed",
+                    error_code="DISCOVERY_RUN_FAILED",
+                    error_message=error_message,
+                )
+
             repository.update_run_status(
                 run_id=run_id,
                 status="FAILED",
-                current_stage=current.get(
-                    "current_stage"
-                ),
-                progress_percentage=current.get(
-                    "progress_percentage"
+                current_stage=current_stage,
+                progress_percentage=(
+                    progress_percentage
                 ),
                 error_code="DISCOVERY_RUN_FAILED",
-                error_message=(
-                    "Discovery run failed. "
-                    f"Failure type: "
-                    f"{error.__class__.__name__}."
+                error_message=error_message,
+            )
+
+        except Exception:
+            logger.error(
+                (
+                    "Could not persist Discovery run "
+                    "failure status"
                 ),
+                exc_info=True,
+                extra={
+                    "discovery_run_id": run_id,
+                },
             )
 
     finally:
@@ -468,7 +617,10 @@ def run_discovery_background(
 
         except Exception:
             logger.warning(
-                "Metadata database cleanup failed",
+                (
+                    "Metadata database cleanup "
+                    "failed"
+                ),
                 extra={
                     "discovery_run_id": run_id,
                 },

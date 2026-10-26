@@ -82,6 +82,9 @@ class OracleConnector(DatabaseConnector):
         selection = self._selection_by_type(
             selected_objects
         )
+        selected_names = sorted(
+            set().union(*selection.values()) if selection else set()
+        )
 
         query = """
             SELECT
@@ -100,15 +103,28 @@ class OracleConnector(DatabaseConnector):
                   'PROCEDURE',
                   'FUNCTION'
               )
-            ORDER BY
-                object_info.OBJECT_TYPE,
-                object_info.OBJECT_NAME
         """
+        parameters = {"owner": owner}
+        if selected_objects:
+            if selected_names:
+                name_bindings = []
+                for index, object_name in enumerate(selected_names):
+                    bind_name = f"selected_name_{index}"
+                    name_bindings.append(f":{bind_name}")
+                    parameters[bind_name] = object_name
+                query += (
+                    " AND object_info.OBJECT_NAME IN ("
+                    + ", ".join(name_bindings)
+                    + ")"
+                )
+            else:
+                query += " AND 1 = 0"
+        query += " ORDER BY object_info.OBJECT_TYPE, object_info.OBJECT_NAME"
 
         cursor = self.connection.cursor()
 
         try:
-            cursor.execute(query, owner=owner)
+            cursor.execute(query, **parameters)
             rows = cursor.fetchall()
         finally:
             cursor.close()

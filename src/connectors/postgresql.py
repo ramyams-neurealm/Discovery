@@ -24,6 +24,7 @@ class PostgreSQLConnector(DatabaseConnector):
             password=self.password,
             sslmode="require" if self.config.get("ssl_enabled") else "prefer",
             connect_timeout=10,
+            options="-c statement_timeout=5000ms",
         )
         return self.connection
 
@@ -145,6 +146,13 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         Discover PostgreSQL tables, views, and materialized views.
         """
+        selected_names = sorted(
+            (selection or {}).get("TABLE", set())
+            | (selection or {}).get("VIEW", set())
+            | (selection or {}).get("MATERIALIZED_VIEW", set())
+        )
+        if selection and not selected_names:
+            return []
 
         query = """
             SELECT
@@ -190,6 +198,12 @@ class PostgreSQLConnector(DatabaseConnector):
               AND namespace_info.nspname = %s
             """
             parameters.append(schema_filter)
+
+        if selected_names:
+            query += " AND relation_info.relname IN (" + ", ".join(
+                ["%s"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
 
         query += """
             ORDER BY
@@ -409,6 +423,10 @@ class PostgreSQLConnector(DatabaseConnector):
         Discover PostgreSQL functions and procedures with
         rich routine metadata.
         """
+        if selection and not (
+            selection.get("FUNCTION") or selection.get("PROCEDURE")
+        ):
+            return []
 
         query = """
             SELECT
@@ -472,6 +490,16 @@ class PostgreSQLConnector(DatabaseConnector):
               AND namespace_info.nspname = %s
             """
             parameters.append(schema_filter)
+
+        selected_names = sorted(
+            (selection or {}).get("FUNCTION", set())
+            | (selection or {}).get("PROCEDURE", set())
+        )
+        if selected_names:
+            query += " AND routine_info.proname IN (" + ", ".join(
+                ["%s"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
 
         query += """
             ORDER BY
@@ -604,6 +632,8 @@ class PostgreSQLConnector(DatabaseConnector):
     ) -> list[dict[str, Any]]:
         
         """Discover user-defined PostgreSQL triggers."""
+        if selection and not selection.get("TRIGGER"):
+            return []
 
         query = """
             SELECT
@@ -672,6 +702,13 @@ class PostgreSQLConnector(DatabaseConnector):
               AND table_namespace.nspname = %s
             """
             parameters.append(schema_filter)
+
+        selected_names = sorted((selection or {}).get("TRIGGER", set()))
+        if selected_names:
+            query += " AND trigger_info.tgname IN (" + ", ".join(
+                ["%s"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
 
         query += """
             ORDER BY

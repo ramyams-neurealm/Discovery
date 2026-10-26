@@ -256,6 +256,12 @@ class SQLServerConnector(DatabaseConnector):
         selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover SQL Server tables and views with rich metadata."""
+        selected_names = sorted(
+            (selection or {}).get("TABLE", set())
+            | (selection or {}).get("VIEW", set())
+        )
+        if selection and not selected_names:
+            return []
 
         query = """
             SELECT
@@ -314,6 +320,12 @@ class SQLServerConnector(DatabaseConnector):
               AND schema_info.name = ?
             """
             parameters.append(schema_filter)
+
+        if selected_names:
+            query += " AND object_info.name IN (" + ", ".join(
+                ["?"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
 
         query += """
             ORDER BY
@@ -443,6 +455,10 @@ class SQLServerConnector(DatabaseConnector):
         Discover SQL Server procedures and functions
         with rich metadata.
         """
+        if selection and not (
+            selection.get("FUNCTION") or selection.get("PROCEDURE")
+        ):
+            return []
 
         query = """
             SELECT
@@ -505,6 +521,16 @@ class SQLServerConnector(DatabaseConnector):
               AND schema_info.name = ?
             """
             parameters.append(schema_filter)
+
+        selected_names = sorted(
+            (selection or {}).get("FUNCTION", set())
+            | (selection or {}).get("PROCEDURE", set())
+        )
+        if selected_names:
+            query += " AND object_info.name IN (" + ", ".join(
+                ["?"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
 
         query += """
             ORDER BY
@@ -614,6 +640,8 @@ class SQLServerConnector(DatabaseConnector):
         selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover table-level SQL Server DML triggers."""
+        if selection and not selection.get("TRIGGER"):
+            return []
 
         query = """
             SELECT
@@ -659,6 +687,13 @@ class SQLServerConnector(DatabaseConnector):
               AND table_schema.name = ?
             """
             parameters.append(schema_filter)
+
+        selected_names = sorted((selection or {}).get("TRIGGER", set()))
+        if selected_names:
+            query += " AND trigger_info.name IN (" + ", ".join(
+                ["?"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
 
         query += """
             ORDER BY

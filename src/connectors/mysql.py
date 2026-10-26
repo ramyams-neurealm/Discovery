@@ -23,6 +23,8 @@ class MySQLConnector(DatabaseConnector):
             user=self.config["username"],
             password=self.password,
             connection_timeout=10,
+            read_timeout=30,
+            write_timeout=30,
             ssl_disabled=not self.config.get("ssl_enabled", False),
         )
         return self.connection
@@ -131,6 +133,12 @@ class MySQLConnector(DatabaseConnector):
         selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover MySQL tables and views with richer metadata."""
+        selected_names = sorted(
+            (selection or {}).get("TABLE", set())
+            | (selection or {}).get("VIEW", set())
+        )
+        if selection and not selected_names:
+            return []
 
         query = """
             SELECT
@@ -159,16 +167,22 @@ class MySQLConnector(DatabaseConnector):
                   'BASE TABLE',
                   'VIEW'
               )
-
-            ORDER BY table_info.TABLE_NAME
         """
+
+        parameters: list[Any] = [database_name]
+        if selected_names:
+            query += " AND table_info.TABLE_NAME IN (" + ", ".join(
+                ["%s"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
+        query += " ORDER BY table_info.TABLE_NAME"
 
         cursor = self.connection.cursor()
 
         try:
             cursor.execute(
                 query,
-                (database_name,),
+                tuple(parameters),
             )
             rows = cursor.fetchall()
         finally:
@@ -303,6 +317,10 @@ class MySQLConnector(DatabaseConnector):
         selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover MySQL procedures and functions with rich metadata."""
+        if selection and not (
+            selection.get("FUNCTION") or selection.get("PROCEDURE")
+        ):
+            return []
 
         query = """
             SELECT
@@ -336,19 +354,24 @@ class MySQLConnector(DatabaseConnector):
                 AS routine_info
 
             WHERE routine_info.ROUTINE_SCHEMA = %s
-
-            ORDER BY
-                routine_info.ROUTINE_TYPE,
-                routine_info.ROUTINE_NAME
         """
+
+        parameters: list[Any] = [database_name]
+        selected_names = sorted(
+            (selection or {}).get("FUNCTION", set())
+            | (selection or {}).get("PROCEDURE", set())
+        )
+        if selected_names:
+            query += " AND routine_info.ROUTINE_NAME IN (" + ", ".join(
+                ["%s"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
+        query += " ORDER BY routine_info.ROUTINE_TYPE, routine_info.ROUTINE_NAME"
 
         cursor = self.connection.cursor()
 
         try:
-            cursor.execute(
-                query,
-                (database_name,),
-            )
+            cursor.execute(query, tuple(parameters))
             rows = cursor.fetchall()
         finally:
             cursor.close()
@@ -446,6 +469,8 @@ class MySQLConnector(DatabaseConnector):
         selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Discover user-defined MySQL triggers."""
+        if selection and not selection.get("TRIGGER"):
+            return []
 
         query = """
             SELECT
@@ -464,13 +489,20 @@ class MySQLConnector(DatabaseConnector):
                 DEFINER
             FROM information_schema.TRIGGERS
             WHERE TRIGGER_SCHEMA = %s
-            ORDER BY TRIGGER_NAME
         """
+        parameters: list[Any] = [database_name]
+        selected_names = sorted((selection or {}).get("TRIGGER", set()))
+        if selected_names:
+            query += " AND TRIGGER_NAME IN (" + ", ".join(
+                ["%s"] * len(selected_names)
+            ) + ")"
+            parameters.extend(selected_names)
+        query += " ORDER BY TRIGGER_NAME"
 
         cursor = self.connection.cursor()
 
         try:
-            cursor.execute(query, (database_name,))
+            cursor.execute(query, tuple(parameters))
             rows = cursor.fetchall()
         finally:
             cursor.close()

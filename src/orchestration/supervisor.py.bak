@@ -1,12 +1,33 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from src.agents.ccpa_compliance_score_agent import CcpaComplianceScoreAgent
+from src.agents.dpdp_compliance_score_agent import DpdpComplianceScoreAgent
+from src.agents.gdpr_compliance_score_agent import GdprComplianceScoreAgent
+from src.agents.glba_compliance_score_agent import GlbaComplianceScoreAgent
+from src.agents.hipaa_compliance_score_agent import HipaaComplianceScoreAgent
+from src.agents.pci_dss_compliance_score_agent import PciDssComplianceScoreAgent
+from src.agents.pipeda_compliance_score_agent import PipedaComplianceScoreAgent
 from src.orchestration.state import DiscoveryState
 from src.repositories.discovery_repository import DiscoveryRepository
+from src.services.key_vault_service import KeyVaultService
 from src.tools.classification_policy import build_classification_summary, reconcile_linked_identifiers
+from src.tools.hipaa_control_policy import evaluate_hipaa_controls
+from src.tools.pci_dss_control_policy import (
+    build_pci_dss_classification_findings,
+    evaluate_pci_dss_controls,
+)
+from src.tools.glba_control_policy import (
+    build_glba_classification_findings,
+    evaluate_glba_controls,
+)
+from src.utils.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class DiscoverySupervisor:
@@ -15,9 +36,11 @@ class DiscoverySupervisor:
         metadata_agent,
         classification_agent,
         dependency_agent,
-        hipaa_agent,
+        hipaa_agent: HipaaComplianceScoreAgent,
         report_agent,
         repository: DiscoveryRepository,
+        settings: Settings,
+        key_vault: KeyVaultService,
     ):
         self.metadata_agent = metadata_agent
         self.classification_agent = classification_agent
@@ -25,6 +48,8 @@ class DiscoverySupervisor:
         self.hipaa_agent = hipaa_agent
         self.report_agent = report_agent
         self.repository = repository
+        self.settings = settings
+        self.key_vault = key_vault
         self.graph = self._build_graph()
 
     def _metadata(self, state: DiscoveryState) -> DiscoveryState:
@@ -32,116 +57,43 @@ class DiscoverySupervisor:
             run_id=state["discovery_run_id"],
             connection_id=state["connection_id"],
             source_connection=state["source_connection"],
+            selected_objects=state.get("selected_objects", []),
         )
         return {**state, **output, "status": "RUNNING"}
 
     def _classify(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
-
         if "COLUMN_CLASSIFICATION" not in state["effective_scopes"]:
             return state
-
-        self.repository.update_run_status(
-            run_id=run_id,
-            status="RUNNING",
-            current_stage="COLUMN_CLASSIFICATION",
-            progress_percentage=40,
-        )
-        self.repository.update_stage(
-            run_id=run_id,
-            stage_name="COLUMN_CLASSIFICATION",
-            stage_status="RUNNING",
-            message="Classifying discovered columns",
-        )
-
-        column_profiles = state.get("column_profiles", [])
-        results = []
-
+        self.repository.update_run_status(run_id, "RUNNING", "COLUMN_CLASSIFICATION", 40)
+        self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "RUNNING", "Classifying discovered columns")
+        profiles = state.get("column_profiles", [])
         try:
-            for profile in column_profiles:
-                payload = {
-                    "object_id": profile["object_id"],
-                    "schema_name": profile["schema_name"],
-                    "table_name": profile["table_name"],
-                    "column_name": profile["column_name"],
-                    "data_type": profile["data_type"],
-                    "nullable": profile.get("nullable"),
-                    "is_primary_key": profile.get(
-                        "is_primary_key", False
-                    ),
-                    "is_foreign_key": profile.get(
-                        "is_foreign_key", False
-                    ),
-                    "neighboring_columns": profile.get(
-                        "neighboring_columns", []
-                    ),
-                    "masked_samples": profile.get(
-                        "masked_samples", []
-                    ),
-                }
-                results.append(
-                    self.classification_agent.classify(payload)
-                )
-
-            column_ids_by_key = {
-                (
-                    profile["schema_name"],
-                    profile["table_name"],
-                    profile["column_name"],
-                ): profile["column_id"]
-                for profile in column_profiles
-            }
-
-            saved_records = self.repository.save_classifications(
-                run_id=run_id,
-                results=results,
-                column_ids_by_key=column_ids_by_key,
+            results = []
+            keys = (
+                "object_id", "column_id", "schema_name", "table_name", "column_name",
+                "data_type", "nullable", "is_primary_key", "is_foreign_key",
+                "neighboring_columns", "masked_samples", "null_percentage", "distinct_count",
             )
-
-            self.repository.update_stage(
-                run_id=run_id,
-                stage_name="COLUMN_CLASSIFICATION",
-                stage_status="COMPLETED",
-                message=f"Classified {len(results)} columns",
-                processed_items=len(results),
-                total_items=len(column_profiles),
+            for profile in profiles:
+                results.append(self.classification_agent.classify({key: profile.get(key) for key in keys}))
+            results = reconcile_linked_identifiers(results, state.get("objects", []))
+            summary = build_classification_summary(state.get("objects", []), profiles, results)
+            ids = {(p["schema_name"], p["table_name"], p["column_name"]): p["column_id"] for p in profiles}
+            saved = self.repository.save_classifications(run_id, results, ids)
+            message = (
+                f"Classified {summary['classified_columns']} of {summary['discovered_columns']} "
+                f"discovered columns; {summary['excluded_columns']} excluded because "
+                "they had no eligible table profile."
             )
-            self.repository.update_run_status(
-                run_id=run_id,
-                status="RUNNING",
-                current_stage="COLUMN_CLASSIFICATION",
-                progress_percentage=60,
-            )
-
-            return {
-                **state,
-                "classifications": results,
-                "classification_records": saved_records,
-            }
-
+            self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "COMPLETED", message, len(results), summary["eligible_columns"])
+            self.repository.update_run_status(run_id, "RUNNING", "COLUMN_CLASSIFICATION", 60)
+            return {**state, "classifications": results, "classification_records": saved, "classification_summary": summary}
         except Exception as error:
-            safe_error = (
-                "Column classification failed: "
-                f"{error.__class__.__name__}"
-            )
-            self.repository.update_stage(
-                run_id=run_id,
-                stage_name="COLUMN_CLASSIFICATION",
-                stage_status="FAILED",
-                message="Column classification failed",
-                error_code="CLASSIFICATION_FAILED",
-                error_message=safe_error,
-            )
-            self.repository.update_run_status(
-                run_id=run_id,
-                status="FAILED",
-                current_stage="COLUMN_CLASSIFICATION",
-                progress_percentage=40,
-                error_code="CLASSIFICATION_FAILED",
-                error_message=safe_error,
-            )
+            safe = f"Column classification failed: {error.__class__.__name__}"
+            self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "FAILED", "Column classification failed", error_code="CLASSIFICATION_FAILED", error_message=safe)
+            self.repository.update_run_status(run_id, "FAILED", "COLUMN_CLASSIFICATION", 40, "CLASSIFICATION_FAILED", safe)
             raise
-
     def _dependencies(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
         if "DEPENDENCY_MAP" not in state["effective_scopes"]:
@@ -211,82 +163,284 @@ class DiscoverySupervisor:
             )
             raise
 
-    def _hipaa(self, state: DiscoveryState) -> DiscoveryState:
+    def _compliance(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
-        if "HIPAA_COMPLIANCE" not in state["effective_scopes"]:
+        selected = set(state.get("selected_frameworks", []))
+        generic_requested = (
+            "REGULATORY_COMPLIANCE" in state["effective_scopes"]
+        )
+        legacy_hipaa = (
+            "HIPAA_COMPLIANCE" in state["effective_scopes"]
+        )
+        if not generic_requested and not legacy_hipaa:
             return state
-
+        stage_name = (
+            "REGULATORY_COMPLIANCE"
+            if generic_requested
+            else "HIPAA_COMPLIANCE"
+        )
         self.repository.update_run_status(
-            run_id=run_id,
-            status="RUNNING",
-            current_stage="HIPAA_COMPLIANCE",
-            progress_percentage=78,
+            run_id, "RUNNING", stage_name, 78
         )
         self.repository.update_stage(
-            run_id=run_id,
-            stage_name="HIPAA_COMPLIANCE",
-            stage_status="RUNNING",
-            message="Evaluating HIPAA findings for PHI columns",
+            run_id, stage_name, "RUNNING",
+            "Evaluating selected compliance policy packs",
         )
-
         try:
-            findings, score = self.hipaa_agent.evaluate(
-                state.get("classifications", [])
+            classification_records = state.get(
+                "classification_records", []
             )
-            saved_findings = self.repository.save_hipaa_findings(
-                run_id=run_id,
-                findings=findings,
-                classification_records=state.get(
-                    "classification_records", []
-                ),
-            )
-            score_id = self.repository.save_hipaa_score(
-                run_id=run_id,
-                score=score,
-            )
+            safe_classifications = state.get("classifications") or []
+            assessments: dict[str, Any] = {}
+            legacy_output: dict[str, Any] = {}
+            compliance_findings: list[Any] = []
+            compliance_scores: dict[str, Any] = {}
+
+            if "HIPAA" in selected:
+                try:
+                    findings, score = self.hipaa_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "HIPAA compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    findings, score = [], None
+                saved_findings = self.repository.save_hipaa_findings(
+                    run_id, findings, classification_records
+                )
+                score_id = None
+                generic_hipaa = None
+                if score is not None:
+                    score_id = self.repository.save_hipaa_score(
+                        run_id, score
+                    )
+                    generic_hipaa = (
+                        self.repository.save_generic_hipaa_result(
+                            run_id, saved_findings, score
+                        )
+                    )
+                assessments["HIPAA"] = (
+                    self.repository.save_control_assessment(
+                        run_id=run_id,
+                        framework_code="HIPAA",
+                        classification_records=classification_records,
+                        evaluator=evaluate_hipaa_controls,
+                    )
+                )
+                legacy_output = {
+                    "hipaa_findings": findings,
+                    "hipaa_finding_records": saved_findings,
+                    "hipaa_score": score,
+                    "hipaa_score_id": score_id,
+                    "generic_hipaa_result": generic_hipaa,
+                }
+                compliance_findings.extend(findings)
+                compliance_scores["HIPAA"] = score
+
+            if "GDPR" in selected:
+                try:
+                    gdpr_agent = GdprComplianceScoreAgent(
+                        settings=self.settings,
+                        key_vault=self.key_vault,
+                    )
+                    gdpr_findings, gdpr_score = gdpr_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "GDPR compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    gdpr_findings, gdpr_score = [], None
+                legacy_output.update(
+                    {
+                        "gdpr_findings": gdpr_findings,
+                        "gdpr_score": gdpr_score,
+                    }
+                )
+                compliance_findings.extend(gdpr_findings)
+                compliance_scores["GDPR"] = gdpr_score
+
+            if "PCI_DSS" in selected:
+                try:
+                    pci_dss_agent = PciDssComplianceScoreAgent(
+                        settings=self.settings,
+                        key_vault=self.key_vault,
+                    )
+                    pci_dss_findings, pci_dss_score = pci_dss_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "PCI_DSS compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    pci_dss_findings, pci_dss_score = [], None
+                legacy_output.update(
+                    {
+                        "pci_dss_findings": pci_dss_findings,
+                        "pci_dss_score": pci_dss_score,
+                    }
+                )
+                compliance_findings.extend(pci_dss_findings)
+                compliance_scores["PCI_DSS"] = pci_dss_score
+                assessments["PCI_DSS"] = (
+                    self.repository.save_control_assessment(
+                        run_id=run_id,
+                        framework_code="PCI_DSS",
+                        classification_records=classification_records,
+                        evaluator=evaluate_pci_dss_controls,
+                        finding_builder=(
+                            build_pci_dss_classification_findings
+                        ),
+                    )
+                )
+            if "GLBA" in selected:
+                try:
+                    glba_agent = GlbaComplianceScoreAgent(
+                        settings=self.settings,
+                        key_vault=self.key_vault,
+                    )
+                    glba_findings, glba_score = glba_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "GLBA compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    glba_findings, glba_score = [], None
+                legacy_output.update(
+                    {
+                        "glba_findings": glba_findings,
+                        "glba_score": glba_score,
+                    }
+                )
+                compliance_findings.extend(glba_findings)
+                compliance_scores["GLBA"] = glba_score
+                assessments["GLBA"] = (
+                    self.repository.save_control_assessment(
+                        run_id=run_id,
+                        framework_code="GLBA",
+                        classification_records=classification_records,
+                        evaluator=evaluate_glba_controls,
+                        finding_builder=(
+                            build_glba_classification_findings
+                        ),
+                    )
+                )
+
+            if "DPDP" in selected:
+                try:
+                    dpdp_agent = DpdpComplianceScoreAgent(
+                        settings=self.settings,
+                        key_vault=self.key_vault,
+                    )
+                    dpdp_findings, dpdp_score = dpdp_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "DPDP compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    dpdp_findings, dpdp_score = [], None
+                legacy_output.update(
+                    {
+                        "dpdp_findings": dpdp_findings,
+                        "dpdp_score": dpdp_score,
+                    }
+                )
+                compliance_findings.extend(dpdp_findings)
+                compliance_scores["DPDP"] = dpdp_score
+
+            if "CCPA_CPRA" in selected or "CCPA" in selected:
+                try:
+                    ccpa_agent = CcpaComplianceScoreAgent(
+                        settings=self.settings,
+                        key_vault=self.key_vault,
+                    )
+                    ccpa_findings, ccpa_score = ccpa_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "CCPA_CPRA compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    ccpa_findings, ccpa_score = [], None
+                legacy_output.update(
+                    {
+                        "ccpa_findings": ccpa_findings,
+                        "ccpa_score": ccpa_score,
+                    }
+                )
+                compliance_findings.extend(ccpa_findings)
+                compliance_scores["CCPA_CPRA"] = ccpa_score
+
+            if "PIPEDA" in selected:
+                try:
+                    pipeda_agent = PipedaComplianceScoreAgent(
+                        settings=self.settings,
+                        key_vault=self.key_vault,
+                    )
+                    pipeda_findings, pipeda_score = pipeda_agent.evaluate(
+                        safe_classifications
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "PIPEDA compliance evaluation failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    pipeda_findings, pipeda_score = [], None
+                legacy_output.update(
+                    {
+                        "pipeda_findings": pipeda_findings,
+                        "pipeda_score": pipeda_score,
+                    }
+                )
+                compliance_findings.extend(pipeda_findings)
+                compliance_scores["PIPEDA"] = pipeda_score
+
             self.repository.update_stage(
-                run_id=run_id,
-                stage_name="HIPAA_COMPLIANCE",
-                stage_status="COMPLETED",
-                message=(
-                    f"Evaluated {score.phi_columns_checked} PHI columns"
-                ),
-                processed_items=score.phi_columns_checked,
-                total_items=score.phi_columns_checked,
+                run_id, stage_name, "COMPLETED",
+                f"Evaluated {len(compliance_scores)} policy pack(s)",
+                len(compliance_scores), len(selected),
             )
             self.repository.update_run_status(
-                run_id=run_id,
-                status="RUNNING",
-                current_stage="HIPAA_COMPLIANCE",
-                progress_percentage=90,
+                run_id, "RUNNING", stage_name, 90
             )
             return {
                 **state,
-                "hipaa_findings": findings,
-                "hipaa_finding_records": saved_findings,
-                "hipaa_score": score,
-                "hipaa_score_id": score_id,
+                **legacy_output,
+                "compliance_assessments": assessments,
+                "findings": compliance_findings,
+                "compliance_findings": compliance_findings,
+                "compliance_scores": compliance_scores,
             }
         except Exception as error:
             safe_error = (
-                "HIPAA evaluation failed: "
+                "Compliance evaluation failed: "
                 f"{error.__class__.__name__}"
             )
             self.repository.update_stage(
-                run_id=run_id,
-                stage_name="HIPAA_COMPLIANCE",
-                stage_status="FAILED",
-                message="HIPAA evaluation failed",
-                error_code="HIPAA_EVALUATION_FAILED",
+                run_id, stage_name, "FAILED",
+                "Compliance evaluation failed",
+                error_code="COMPLIANCE_EVALUATION_FAILED",
                 error_message=safe_error,
             )
             self.repository.update_run_status(
-                run_id=run_id,
-                status="FAILED",
-                current_stage="HIPAA_COMPLIANCE",
-                progress_percentage=78,
-                error_code="HIPAA_EVALUATION_FAILED",
-                error_message=safe_error,
+                run_id, "FAILED", stage_name, 78,
+                "COMPLIANCE_EVALUATION_FAILED", safe_error,
             )
             raise
 
@@ -328,14 +482,14 @@ class DiscoverySupervisor:
         graph.add_node("metadata_and_profiling", self._metadata)
         graph.add_node("classification", self._classify)
         graph.add_node("dependency_mapping", self._dependencies)
-        graph.add_node("hipaa", self._hipaa)
+        graph.add_node("compliance", self._compliance)
         graph.add_node("report", self._report)
 
         graph.add_edge(START, "metadata_and_profiling")
         graph.add_edge("metadata_and_profiling", "classification")
         graph.add_edge("classification", "dependency_mapping")
-        graph.add_edge("dependency_mapping", "hipaa")
-        graph.add_edge("hipaa", "report")
+        graph.add_edge("dependency_mapping", "compliance")
+        graph.add_edge("compliance", "report")
         graph.add_edge("report", END)
         return graph.compile()
 
@@ -345,16 +499,29 @@ class DiscoverySupervisor:
         connection_id: int,
         scopes: list[str],
         source_connection: Any,
+        selected_objects: list[dict[str, str]] | None = None,
+        selected_frameworks: list[str] | None = None,
     ) -> DiscoveryState:
         effective_scopes = set(scopes)
-        if "HIPAA_COMPLIANCE" in effective_scopes:
+        if (
+            "HIPAA_COMPLIANCE" in effective_scopes
+            or "REGULATORY_COMPLIANCE" in effective_scopes
+        ):
             effective_scopes.add("COLUMN_CLASSIFICATION")
+        framework_codes = list(selected_frameworks or [])
+        if (
+            "HIPAA_COMPLIANCE" in effective_scopes
+            and "HIPAA" not in framework_codes
+        ):
+            framework_codes.append("HIPAA")
 
         initial_state: DiscoveryState = {
             "discovery_run_id": discovery_run_id,
             "connection_id": connection_id,
             "requested_scopes": scopes,
             "effective_scopes": sorted(effective_scopes),
+            "selected_objects": selected_objects or [],
+            "selected_frameworks": framework_codes,
             "source_connection": source_connection,
             "errors": [],
             "status": "PENDING",

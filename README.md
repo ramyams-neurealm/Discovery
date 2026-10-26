@@ -35,6 +35,12 @@ python -m uvicorn src.main:app --reload
 
 Swagger UI: `http://127.0.0.1:8000/docs`
 
+## Discovery metadata stage status
+
+`METADATA_PROFILING` is marked `COMPLETED` when metadata discovery succeeds, including when a discovered table has zero rows. The stage message reports the number of empty tables; this is valid metadata and does not prevent classification from using discovered columns. `COMPLETED_WITH_WARNINGS` is used when no objects are discovered, a table profile is missing, or individual table/column sampling queries fail. Sampling continues for unaffected objects and columns; the stage message and error fields identify recorded query failures instead of dropping all successful profiles.
+
+To verify a change to the background worker, restart the API process and create a new discovery run. Existing stage records are historical and are not rewritten when code changes. Check the new run's metadata-stage message, `processed_items`, and `total_items` together with the application logs.
+
 ## Security rules
 
 - Never commit `.env`.

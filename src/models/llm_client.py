@@ -12,4 +12,5 @@ def build_llm(settings: Settings, key_vault: KeyVaultService) -> ChatOpenAI:
         api_key=api_key,
         temperature=settings.llm_temperature,
         max_retries=settings.llm_max_retries,
+        timeout=settings.llm_timeout_seconds,
     )

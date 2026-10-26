@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from uuid import UUID, uuid4
@@ -9,6 +10,8 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     HTTPException,
+    Path,
+    Query,
     Response,
     status,
 )
@@ -25,6 +28,13 @@ from src.models.schemas import (
     ConnectionInput,
     ConnectionUpdate,
     DiscoveryRunRequest,
+    DiscoveryRunOverviewResponse,
+    PaginatedClassificationsResponse,
+    FocusedLineageItem,
+    FocusedLineageResponse,
+    FullLineageResponse,
+    LineageEdge,
+    LineageNode,
 )
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.services.database import MetadataDatabase
@@ -37,6 +47,16 @@ from src.utils.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+SUPPORTED_FRAMEWORKS = {
+    "HIPAA",
+    "GDPR",
+    "PCI_DSS",
+    "GLBA",
+    "DPDP",
+    "CCPA_CPRA",
+    "CCPA",
+    "PIPEDA",
+}
 
 
 def _safe_config(
@@ -73,6 +93,56 @@ def _effective_scopes(requested_scopes: list[str]) -> list[str]:
 
 def _get_repository(database: MetadataDatabase) -> DiscoveryRepository:
     return DiscoveryRepository(database)
+
+
+def _lineage_node(
+    record: dict[str, Any],
+) -> LineageNode:
+    schema_name = str(
+        record.get("schema_name") or ""
+    ).strip()
+
+    object_name = str(
+        record.get("object_name") or ""
+    ).strip()
+
+    qualified_name = (
+        f"{schema_name}.{object_name}"
+        if schema_name
+        else object_name
+    )
+
+    return LineageNode(
+        id=str(record["object_id"]),
+        schema_name=schema_name,
+        object_name=object_name,
+        qualified_name=qualified_name,
+        type=str(
+            record.get("object_type")
+            or "unknown"
+        ).lower(),
+        row_count=(
+            int(record["row_count"])
+            if record.get("row_count")
+            is not None
+            else None
+        ),
+        language=record.get("language"),
+    )
+
+def _lineage_edge_values(edge: dict[str, Any]) -> dict[str, str]:
+    relationship = str(edge.get("relationship_type") or "DEPENDENCY").upper()
+    kind = "FK" if relationship == "FOREIGN_KEY" else relationship
+    source_column = edge.get("source_column")
+    target_column = edge.get("target_column")
+    if source_column and target_column:
+        label = f"{source_column} -> {edge['target_object']}.{target_column}"
+    else:
+        label = relationship
+    return {
+        "kind": kind,
+        "label": label,
+    }
 
 
 def _require_discovery_run(
@@ -446,16 +516,26 @@ def start_discovery_run(
         validation = repository.validate_selected_frameworks(
             selected_frameworks
         )
-        if validation["unknown"]:
+        unknown_frameworks = [
+            framework
+            for framework in validation["unknown"]
+            if framework not in SUPPORTED_FRAMEWORKS
+        ]
+        if unknown_frameworks:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "error_code": "UNKNOWN_COMPLIANCE_FRAMEWORK",
                     "message": "One or more framework codes are unknown.",
-                    "frameworks": validation["unknown"],
+                    "frameworks": unknown_frameworks,
                 },
             )
-        if validation["unavailable"]:
+        unavailable_frameworks = [
+            framework
+            for framework in validation["unavailable"]
+            if framework not in {"DPDP", "CCPA_CPRA", "PIPEDA"}
+        ]
+        if unavailable_frameworks:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -464,10 +544,9 @@ def start_discovery_run(
                         "One or more selected policy packs are not yet "
                         "available for assessment."
                     ),
-                    "frameworks": validation["unavailable"],
+                    "frameworks": unavailable_frameworks,
                 },
             )
-        selected_frameworks = validation["available"]
     run_id = uuid4()
 
     selected_objects = [
@@ -522,7 +601,10 @@ def get_discovery_run_stages(
     return repository.get_run_stages(run_id)
 
 
-@router.get("/discovery-runs/{run_id}/overview")
+@router.get(
+    "/discovery-runs/{run_id}/overview",
+    response_model=DiscoveryRunOverviewResponse,
+)
 def get_discovery_overview(
     run_id: UUID,
     database: MetadataDatabase = Depends(get_database),
@@ -542,49 +624,226 @@ def get_table_profiles(
     return repository.get_table_profiles_result(run_id)
 
 
-@router.get("/discovery-runs/{run_id}/classifications")
-def get_classifications(
-    run_id: UUID,
+@router.get(
+    "/discovery-runs/{run_id}/classifications",
+    response_model=PaginatedClassificationsResponse,
+    summary="Get Column Classifications",
+    description=(
+        "Retrieves column classifications with server-side search, "
+        "filtering, and pagination."
+    ),
+)
+async def get_column_classifications(
+    run_id: UUID = Path(..., description="The UUID of the discovery run"),
+    classification: str | None = Query(
+        None,
+        description=(
+            "Filter by classification type (e.g., PHI, PII, Financial, "
+            "Sensitive, Public)"
+        ),
+    ),
+    search: str | None = Query(
+        None,
+        description="Case-insensitive search matching table_name or column_name",
+    ),
+    limit: int = Query(
+        50,
+        ge=1,
+        le=500,
+        description="Number of records to return per page",
+    ),
+    offset: int = Query(0, ge=0, description="Number of records to skip"),
     database: MetadataDatabase = Depends(get_database),
-) -> list[dict[str, Any]]:
+) -> PaginatedClassificationsResponse:
     repository = _get_repository(database)
-    _require_discovery_run(repository, run_id)
-    return repository.get_classifications_result(run_id)
-
-
-@router.get("/discovery-runs/{run_id}/dependencies")
-def get_dependencies(
-    run_id: UUID,
-    database: MetadataDatabase = Depends(get_database),
-) -> list[dict[str, Any]]:
-    repository = _get_repository(database)
-    _require_discovery_run(repository, run_id)
-    return repository.get_dependencies_result(run_id)
-
-
-@router.get("/discovery-runs/{run_id}/dependencies/{object_id}")
-def get_focused_dependencies(
-    run_id: UUID,
-    object_id: int,
-    database: MetadataDatabase = Depends(get_database),
-) -> dict[str, Any]:
-    repository = _get_repository(database)
-    _require_discovery_run(repository, run_id)
-    edges = repository.get_dependencies_result(
-        run_id=run_id,
-        object_id=object_id,
+    await asyncio.to_thread(_require_discovery_run, repository, run_id)
+    page = await asyncio.to_thread(
+        repository.get_classifications_page,
+        run_id,
+        classification=classification,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
+    return PaginatedClassificationsResponse(
+        run_id=str(run_id),
+        total_count=page["total_count"],
+        limit=limit,
+        offset=offset,
+        counts_by_category=page["counts_by_category"],
+        items=page["items"],
     )
 
-    return {
-        "object_id": object_id,
-        "upstream": [
-            edge for edge in edges if edge["target_object_id"] == object_id
-        ],
-        "downstream": [
-            edge for edge in edges if edge["source_object_id"] == object_id
-        ],
-        "edges": edges,
-    }
+
+@router.get(
+    "/discovery-runs/{run_id}/dependencies",
+    response_model=FullLineageResponse,
+    summary="Get Dependencies",
+    description="Retrieves full dependency/lineage graph for a discovery run.",
+)
+async def get_dependencies(
+    run_id: UUID = Path(..., description="The UUID of the discovery run"),
+    database: MetadataDatabase = Depends(get_database),
+) -> FullLineageResponse:
+    repository = _get_repository(database)
+    await asyncio.to_thread(_require_discovery_run, repository, run_id)
+    node_records = await asyncio.to_thread(
+        repository.get_lineage_nodes_result,
+        run_id,
+    )
+    edge_records = await asyncio.to_thread(
+        repository.get_dependencies_result,
+        run_id,
+    )
+    nodes = [_lineage_node(record) for record in node_records]
+    edges = [
+        LineageEdge(
+            from_node=str(edge["source_object_id"]),
+            to_node=str(edge["target_object_id"]),
+            **_lineage_edge_values(edge),
+        )
+        for edge in edge_records
+    ]
+    return FullLineageResponse(
+        run_id=str(run_id),
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+@router.get(
+    "/discovery-runs/{run_id}/dependencies/{object_id}",
+    response_model=FocusedLineageResponse,
+    summary="Get Focused Dependencies",
+    description=(
+        "Retrieves direct upstream (parents) and downstream (children) "
+        "dependencies for a specific object."
+    ),
+)
+async def get_focused_dependencies(
+    run_id: UUID = Path(..., description="The UUID of the discovery run"),
+    object_id: int = Path(..., description="The discovered object ID"),
+    database: MetadataDatabase = Depends(get_database),
+) -> FocusedLineageResponse:
+    repository = _get_repository(database)
+    await asyncio.to_thread(_require_discovery_run, repository, run_id)
+    node_records = await asyncio.to_thread(
+        repository.get_lineage_nodes_result,
+        run_id,
+    )
+    target_record = next(
+        (
+            record
+            for record in node_records
+            if int(record["object_id"]) == object_id
+        ),
+        None,
+    )
+    if target_record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Object '{object_id}' or run '{run_id}' not found."
+            ),
+        )
+
+    edges = await asyncio.to_thread(
+        repository.get_dependencies_result,
+        run_id,
+        object_id,
+    )
+    upstream = []
+    downstream = []
+
+    for edge in edges:
+        edge_values = _lineage_edge_values(
+            edge
+        )
+
+        if (
+            int(edge["target_object_id"])
+            == object_id
+        ):
+            source_schema = str(
+                edge.get("source_schema")
+                or ""
+            ).strip()
+
+            source_object = str(
+                edge.get("source_object")
+                or ""
+            ).strip()
+
+            source_qualified_name = (
+                f"{source_schema}.{source_object}"
+                if source_schema
+                else source_object
+            )
+
+            upstream.append(
+                FocusedLineageItem(
+                    id=str(
+                        edge["source_object_id"]
+                    ),
+                    schema_name=source_schema,
+                    object_name=source_object,
+                    qualified_name=(
+                        source_qualified_name
+                    ),
+                    type=str(
+                        edge[
+                            "source_object_type"
+                        ]
+                    ).lower(),
+                    **edge_values,
+                )
+            )
+
+        if (
+            int(edge["source_object_id"])
+            == object_id
+        ):
+            target_schema = str(
+                edge.get("target_schema")
+                or ""
+            ).strip()
+
+            target_object = str(
+                edge.get("target_object")
+                or ""
+            ).strip()
+
+            target_qualified_name = (
+                f"{target_schema}.{target_object}"
+                if target_schema
+                else target_object
+            )
+
+            downstream.append(
+                FocusedLineageItem(
+                    id=str(
+                        edge["target_object_id"]
+                    ),
+                    schema_name=target_schema,
+                    object_name=target_object,
+                    qualified_name=(
+                        target_qualified_name
+                    ),
+                    type=str(
+                        edge[
+                            "target_object_type"
+                        ]
+                    ).lower(),
+                    **edge_values,
+                )
+            )
+
+    return FocusedLineageResponse(
+        run_id=str(run_id),
+        target_object=_lineage_node(target_record),
+        upstream=upstream,
+        downstream=downstream,
+    )
 
 
 @router.get("/discovery-runs/{run_id}/compliance-results")
@@ -652,14 +911,7 @@ def submit_control_evidence(
     }
 
 
-@router.get("/discovery-runs/{run_id}/hipaa-findings")
-def get_hipaa_findings(
-    run_id: UUID,
-    database: MetadataDatabase = Depends(get_database),
-) -> dict[str, Any]:
-    repository = _get_repository(database)
-    _require_discovery_run(repository, run_id)
-    return repository.get_hipaa_result(run_id)
+
 
 
 @router.get("/discovery-runs/{run_id}/export")
@@ -671,12 +923,32 @@ def export_discovery_run(
     run = _require_discovery_run(repository, run_id)
     payload = {
         "run": run,
-        "stages": repository.get_run_stages(run_id),
-        "overview": repository.get_overview(run_id),
-        "table_profiles": repository.get_table_profiles_result(run_id),
-        "classifications": repository.get_classifications_result(run_id),
-        "dependencies": repository.get_dependencies_result(run_id),
-        "hipaa": repository.get_hipaa_result(run_id),
+        "stages": repository.get_run_stages(
+            run_id
+        ),
+        "overview": repository.get_overview(
+            run_id
+        ),
+        "table_profiles": (
+            repository.get_table_profiles_result(
+                run_id
+            )
+        ),
+        "classifications": (
+            repository.get_classifications_result(
+                run_id
+            )
+        ),
+        "dependencies": (
+            repository.get_dependencies_result(
+                run_id
+            )
+        ),
+        "compliance_results": (
+            repository.get_compliance_results(
+                run_id
+            )
+        ),
     }
 
     return JSONResponse(

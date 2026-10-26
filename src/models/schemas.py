@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import (
@@ -373,6 +374,203 @@ class DiscoveryRunResponse(BaseModel):
     selected_frameworks: list[str] = Field(default_factory=list)
 
 
+class DiscoveryRunOverviewResponse(BaseModel):
+    tables_scanned: int = 0
+    total_columns: int = 0
+    profiled_tables: int = 0
+    profiled_columns: int = 0
+    average_null_percentage: float = 0.0
+    average_column_null_percentage: float = 0.0
+    dependency_count: int = 0
+    classifications_needing_review: int = 0
+    hipaa_findings_needing_review: int = 0
+    classification_counts: Dict[str, int] = Field(default_factory=dict)
+    framework_scores: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Dynamic mapping of evaluation scores and risk bands "
+            "for all executed frameworks."
+        ),
+    )
+
+
+class ClassificationItem(BaseModel):
+    table_name: str = Field(..., example="patients")
+    column_name: str = Field(..., example="ssn")
+    data_type: str = Field(..., example="VARCHAR(11)")
+    classification: str = Field(..., example="PHI")
+    confidence: int = Field(..., ge=0, le=100, example=98)
+    sample_value: Optional[str] = Field(default=None, example="***-**-8890")
+
+
+class CategoryCounts(BaseModel):
+    Public: int = 0
+    PII: int = 0
+    PHI: int = 0
+    Financial: int = 0
+    Sensitive: int = 0
+
+
+class PaginatedClassificationsResponse(BaseModel):
+    run_id: str
+    total_count: int
+    limit: int
+    offset: int
+    counts_by_category: CategoryCounts
+    items: List[ClassificationItem]
+
+
+class LineageNode(BaseModel):
+    id: str = Field(
+        ...,
+        example="19025",
+        description=(
+            "Run-specific discovered-object identifier "
+            "used by lineage edges."
+        ),
+    )
+    schema_name: str = Field(
+        ...,
+        example="demooc28",
+        description=(
+            "Database schema containing the object."
+        ),
+    )
+    object_name: str = Field(
+        ...,
+        example="agent_responses",
+        description=(
+            "Readable database object name."
+        ),
+    )
+    qualified_name: str = Field(
+        ...,
+        example="demooc28.agent_responses",
+        description=(
+            "Schema-qualified database object name."
+        ),
+    )
+    type: str = Field(
+        ...,
+        example="table",
+        description="Database object type.",
+    )
+    row_count: Optional[int] = Field(
+        default=None,
+        example=71,
+        description=(
+            "Row count associated with the table profile. "
+            "The value can represent profiled rows when "
+            "sampling was used."
+        ),
+    )
+    language: Optional[str] = Field(
+        default=None,
+        example="PL/pgSQL",
+        description=(
+            "Implementation language for code-bearing "
+            "objects such as functions or procedures."
+        ),
+    )
+
+
+class LineageEdge(BaseModel):
+    from_node: str = Field(
+        ...,
+        alias="from",
+        example="19025",
+    )
+    to_node: str = Field(
+        ...,
+        alias="to",
+        example="19026",
+    )
+    kind: str = Field(
+        ...,
+        example="FK",
+    )
+    label: str = Field(
+        ...,
+        example=(
+            "column_id -> "
+            "discovered_columns.column_id"
+        ),
+    )
+
+    model_config = {
+        "populate_by_name": True,
+    }
+
+
+class FullLineageResponse(BaseModel):
+    run_id: str
+    nodes: List[LineageNode]
+    edges: List[LineageEdge]
+
+
+class FocusedLineageItem(BaseModel):
+    id: str = Field(
+        ...,
+        example="19025",
+        description=(
+            "Run-specific identifier of the related object."
+        ),
+    )
+    schema_name: str = Field(
+        ...,
+        example="demooc28",
+        description=(
+            "Database schema containing the related object."
+        ),
+    )
+    object_name: str = Field(
+        ...,
+        example="agent_responses",
+        description=(
+            "Readable name of the related object."
+        ),
+    )
+    qualified_name: str = Field(
+        ...,
+        example="demooc28.agent_responses",
+        description=(
+            "Schema-qualified related-object name."
+        ),
+    )
+    type: str = Field(
+        ...,
+        example="table",
+        description=(
+            "Related database object type."
+        ),
+    )
+    kind: str = Field(
+        ...,
+        example="FK",
+        description=(
+            "Dependency relationship type."
+        ),
+    )
+    label: str = Field(
+        ...,
+        example=(
+            "column_id -> "
+            "discovered_columns.column_id"
+        ),
+        description=(
+            "Readable description of the dependency."
+        ),
+    )
+
+
+class FocusedLineageResponse(BaseModel):
+    run_id: str
+    target_object: LineageNode
+    upstream: List[FocusedLineageItem]
+    downstream: List[FocusedLineageItem]
+    
+
+
 # ============================================================
 # Classification models
 # ============================================================
@@ -556,3 +754,86 @@ class HipaaScore(BaseModel):
             raise ValueError("Severity counts must not be negative")
 
         return severity_counts
+
+# ------------------------------------------------------------
+# GDPR Compliance Models
+# ------------------------------------------------------------
+
+class GdprFinding(BaseModel):
+    control_code: str = Field(..., description="e.g., GDPR-ART-6, GDPR-ART-9, GDPR-ART-32")
+    object_name: str
+    column_name: Optional[str] = None
+    severity: str = Field(..., description="CRITICAL, SERIOUS, or WARNING")
+    issue_description: str
+    remediation_recommendation: str
+
+class GdprScore(BaseModel):
+    overall_score: int
+    status_band: str
+
+from pydantic import BaseModel, Field
+
+# --- CCPA / CPRA Schemas ---
+class CcpaFinding(BaseModel):
+    control_code: str = Field(description="CCPA Control code, e.g., CCPA-1798.140-SPI or CCPA-1798.100-PI")
+    severity: str = Field(description="CRITICAL, SERIOUS, or WARNING")
+    table_name: str | None = None
+    column_name: str | None = None
+    issue_description: str
+    remediation_recommendation: str
+
+class CcpaScore(BaseModel):
+    overall_score: int
+    status_band: str
+
+# --- DPDP Schemas ---
+class DpdpFinding(BaseModel):
+    control_code: str = Field(description="DPDP Control code, e.g., DPDP-SEC-6 or DPDP-SEC-9")
+    severity: str = Field(description="CRITICAL, SERIOUS, or WARNING")
+    table_name: str | None = None
+    column_name: str | None = None
+    issue_description: str
+    remediation_recommendation: str
+
+class DpdpScore(BaseModel):
+    overall_score: int
+    status_band: str
+
+# --- PIPEDA Schemas ---
+class PipedaFinding(BaseModel):
+    control_code: str = Field(default="PIPEDA-PRIN-4.7", description="PIPEDA Control code")
+    severity: str = Field(description="CRITICAL, SERIOUS, or WARNING")
+    table_name: str | None = None
+    column_name: str | None = None
+    issue_description: str
+    remediation_recommendation: str
+
+class PipedaScore(BaseModel):
+    overall_score: int
+    status_band: str
+
+# --- PCI DSS Schemas ---
+class PciDssFinding(BaseModel):
+    control_code: str = Field(description="PCI-DSS Control code, e.g., PCI-3.4 or PCI-3.5")
+    severity: str = Field(description="CRITICAL, SERIOUS, or WARNING")
+    table_name: str | None = None
+    column_name: str | None = None
+    issue_description: str
+    remediation_recommendation: str
+
+class PciDssScore(BaseModel):
+    overall_score: int
+    status_band: str
+
+# --- GLBA Schemas ---
+class GlbaFinding(BaseModel):
+    control_code: str = Field(default="GLBA-314.4.C", description="GLBA Control code")
+    severity: str = Field(description="CRITICAL, SERIOUS, or WARNING")
+    table_name: str | None = None
+    column_name: str | None = None
+    issue_description: str
+    remediation_recommendation: str
+
+class GlbaScore(BaseModel):
+    overall_score: int
+    status_band: str    

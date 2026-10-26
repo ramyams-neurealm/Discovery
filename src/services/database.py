@@ -24,7 +24,16 @@ class MetadataDatabase:
     ) -> None:
         self.engine: Engine = create_engine(
             settings.database_url,
+            connect_args={
+                # Increased timeout to 60000ms (60 seconds) so batch inserts do not get aborted[cite: 8]
+                "options": "-c statement_timeout=60000ms",
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            },
             pool_pre_ping=True,
+            pool_recycle=300,  # Recycle stale idle connections every 5 minutes
         )
 
     @contextmanager
@@ -33,9 +42,9 @@ class MetadataDatabase:
     ) -> Iterator[Connection]:
         """
         Provide a transaction-managed metadata-store connection.
-mmits automatically when the context exits
-        successfully and rolls back automatically when an exception
-        occurs.
+
+        Commits automatically when the context exits successfully and
+        rolls back automatically when an exception occurs.
         """
 
         with self.engine.begin() as connection:

@@ -7,13 +7,18 @@ def discover_database_metadata(
     source_connector: Any,
     selected_objects: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Discover metadata through the selected vendor connector."""
-    if not selected_objects:
-        return source_connector.discover_metadata()
+    """Discover metadata through the selected database connector."""
 
-    return source_connector.discover_metadata(
-        selected_objects=selected_objects,
+    normalized_selected_objects = list(
+        selected_objects or []
     )
+
+    if normalized_selected_objects:
+        return source_connector.discover_metadata(
+            selected_objects=normalized_selected_objects,
+        )
+
+    return source_connector.discover_metadata()
 
 
 def persist_discovered_metadata(
@@ -21,8 +26,10 @@ def persist_discovered_metadata(
     objects: list[dict[str, Any]],
 ) -> None:
     """Deprecated placeholder retained for backward compatibility."""
+
     del run_id
     del objects
+
     raise NotImplementedError(
         "Use DiscoveryRepository.save_discovered_metadata instead."
     )

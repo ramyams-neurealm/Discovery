@@ -10,7 +10,13 @@ def enum_value(value: Any) -> str:
 
 
 def evaluate_hipaa_controls(controls: list[dict[str, Any]], classifications: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    phi = [row for row in classifications if enum_value(row.get("display_classification")) == "PHI"]
+    phi = [
+        row
+        for row in classifications
+        if enum_value(
+            row.get("display_classification") or row.get("classification")
+        ) == "PHI"
+    ]
     results = []
     for control in controls:
         if control["evaluation_type"] == "PHI_DISCOVERY":

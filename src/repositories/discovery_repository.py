@@ -184,58 +184,35 @@ class DiscoveryRepository:
                 },
             )
 
-    def create_run_stages(
-        self,
-        run_id: UUID,
-        effective_scopes: list[str],
-    ) -> None:
-        """Create all workflow stages and timestamp skipped stages."""
-        effective_scope_set = set(effective_scopes)
-        stage_scope_mapping = {
+    def create_run_stages(self, run_id: UUID, effective_scopes: list[str]) -> None:
+        effective = set(effective_scopes)
+        mapping = {
             "COLUMN_CLASSIFICATION": "COLUMN_CLASSIFICATION",
             "DEPENDENCY_MAPPING": "DEPENDENCY_MAP",
-            "REGULATORY_COMPLIANCE": "REGULATORY_COMPLIANCE",
             "HIPAA_COMPLIANCE": "HIPAA_COMPLIANCE",
         }
         query = text("""
-            INSERT INTO demooc28.discovery_run_stages (
-                discovery_run_id,
-                stage_name,
-                stage_status,
-                message,
-                completed_at
-            ) VALUES (
-                CAST(:run_id AS UUID),
-                CAST(:stage_name AS VARCHAR(64)),
-                CAST(:stage_status AS VARCHAR(32)),
-                CAST(:message AS TEXT),
-                CASE
-                    WHEN CAST(:is_skipped AS BOOLEAN)
+            INSERT INTO demooc28.discovery_run_stages
+                (discovery_run_id, stage_name, stage_status, message, completed_at)
+            VALUES
+                (:run_id, :stage_name, CAST(:stage_status AS VARCHAR), :message,
+                 CASE
+                    WHEN CAST(:stage_status AS VARCHAR) = 'SKIPPED'
                     THEN CURRENT_TIMESTAMP
                     ELSE NULL
-                END
-            )
+                 END)
             ON CONFLICT (discovery_run_id, stage_name) DO NOTHING
         """)
         with self.database.connect() as connection:
-            for stage_name in DISCOVERY_STAGES:
-                required_scope = stage_scope_mapping.get(stage_name)
-                is_skipped = bool(
-                    required_scope
-                    and required_scope not in effective_scope_set
-                )
-                stage_status = "SKIPPED" if is_skipped else "PENDING"
-                message = "Stage not requested" if is_skipped else "Waiting to start"
-                connection.execute(
-                    query,
-                    {
-                        "run_id": str(run_id),
-                        "stage_name": stage_name,
-                        "stage_status": stage_status,
-                        "message": message,
-                        "is_skipped": is_skipped,
-                    },
-                )
+            for stage in DISCOVERY_STAGES:
+                required = mapping.get(stage)
+                skipped = bool(required and required not in effective)
+                connection.execute(query, {
+                    "run_id": str(run_id),
+                    "stage_name": stage,
+                    "stage_status": "SKIPPED" if skipped else "PENDING",
+                    "message": "Stage not requested" if skipped else "Waiting to start",
+                })
 
     def get_run(self, run_id: UUID | str) -> dict[str, Any] | None:
         query = text("""
@@ -432,12 +409,17 @@ class DiscoveryRepository:
             }).scalar_one()
         return int(object_id)
 
-    def save_discovered_column(
+    def save_discovered_columns(
         self,
         run_id: UUID | str,
         object_id: int,
-        column: dict[str, Any],
-    ) -> int:
+        columns: Sequence[dict[str, Any]],
+    ) -> list[int]:
+        """Persists a list of discovered columns in true batched chunks (50 items per SQL call)
+        to eliminate round-trip latency and prevent statement timeouts."""
+        if not columns:
+            return []
+
         query = text("""
             INSERT INTO demooc28.discovered_columns (
                 discovery_run_id, object_id, column_name, ordinal_position,
@@ -458,20 +440,49 @@ class DiscoveryRepository:
                           column_metadata = EXCLUDED.column_metadata
             RETURNING column_id
         """)
-        with self.database.connect() as connection:
-            column_id = connection.execute(query, {
-                "run_id": str(run_id),
-                "object_id": object_id,
-                "column_name": column["column_name"],
-                "ordinal_position": column.get("ordinal_position"),
-                "data_type": column["data_type"],
-                "nullable": column.get("nullable"),
-                "default_value": column.get("default_value"),
-                "is_primary_key": column.get("is_primary_key", False),
-                "is_foreign_key": column.get("is_foreign_key", False),
-                "column_metadata": json.dumps(column.get("column_metadata", {})),
-            }).scalar_one()
-        return int(column_id)
+
+        column_ids: list[int] = []
+        CHUNK_SIZE = 50
+
+        for i in range(0, len(columns), CHUNK_SIZE):
+            chunk = columns[i : i + CHUNK_SIZE]
+
+            # Build list of parameter dicts for true bulk execution
+            batch_params = [
+                {
+                    "run_id": str(run_id),
+                    "object_id": object_id,
+                    "column_name": column["column_name"],
+                    "ordinal_position": column.get("ordinal_position"),
+                    "data_type": column["data_type"],
+                    "nullable": column.get("nullable"),
+                    "default_value": column.get("default_value"),
+                    "is_primary_key": column.get("is_primary_key", False),
+                    "is_foreign_key": column.get("is_foreign_key", False),
+                    "column_metadata": json.dumps(
+                        column.get("column_metadata", {})
+                    ),
+                }
+                for column in chunk
+            ]
+
+            with self.database.connect() as connection:
+                # Execute all 50 items in a single DB round-trip
+                result = connection.execute(query, batch_params)
+                for row in result.scalars():
+                    column_ids.append(int(row))
+
+        return column_ids
+
+    def save_discovered_column(
+        self,
+        run_id: UUID | str,
+        object_id: int,
+        column: dict[str, Any],
+    ) -> int:
+        """Backward-compatibility wrapper for single column persistence calls."""
+        ids = self.save_discovered_columns(run_id, object_id, [column])
+        return ids[0] if ids else 0
 
     def save_discovered_metadata(
         self,
@@ -519,7 +530,7 @@ class DiscoveryRepository:
                 "object_id": profile["object_id"],
                 "row_count": profile.get("row_count"),
                 "column_count": profile["column_count"],
-                "average_null_percentage": profile.get("average_null_percentage"),
+                "average_null_percentage": profile.get("average_null_percentage", 0.0),
                 "profiling_method": profile.get("profiling_method", "EXACT"),
                 "profile_metadata": json.dumps(profile.get("profile_metadata", {})),
             }).scalar_one()
@@ -547,8 +558,8 @@ class DiscoveryRepository:
             profile_id = connection.execute(query, {
                 "run_id": str(run_id),
                 "column_id": profile["column_id"],
-                "null_percentage": profile.get("null_percentage"),
-                "distinct_count": profile.get("distinct_count"),
+                "null_percentage": profile.get("null_percentage", 0.0),
+                "distinct_count": profile.get("distinct_count", 0),
                 "distinct_count_is_approximate": profile.get(
                     "distinct_count_is_approximate", False
                 ),
@@ -829,14 +840,6 @@ class DiscoveryRepository:
         edges,
         objects: list[dict[str, Any]],
     ):
-        """
-        Persist dependency edges whose source and target objects
-        are both included in the current discovery run.
-
-        References outside a limited smoke-test object set are
-        skipped instead of failing the entire discovery run.
-        """
-
         object_ids_by_name = {
             (
                 f"{item['schema_name']}."
@@ -897,7 +900,6 @@ class DiscoveryRepository:
 
         if hasattr(severity, "value"):
             severity = severity.value
-
         if severity in {"NEEDS_REVIEW", "SERIOUS", "CRITICAL"}:
             payload["needs_human_review"] = True
             payload["review_reason"] = (
@@ -968,11 +970,9 @@ class DiscoveryRepository:
                 finding = EXCLUDED.finding,
                 recommendation = EXCLUDED.recommendation,
                 confidence = EXCLUDED.confidence,
-                needs_human_review =
-                    EXCLUDED.needs_human_review,
+                needs_human_review = EXCLUDED.needs_human_review,
                 review_reason = EXCLUDED.review_reason,
-                verification_status =
-                    EXCLUDED.verification_status,
+                verification_status = EXCLUDED.verification_status,
                 agent_version = EXCLUDED.agent_version
             RETURNING finding_id
         """)
@@ -1000,7 +1000,6 @@ class DiscoveryRepository:
             ).scalar_one()
 
         return int(finding_id)
-
 
     def save_hipaa_findings(
         self,
@@ -1096,7 +1095,6 @@ class DiscoveryRepository:
             ).scalar_one()
 
         return int(score_id)
-
 
     def save_control_assessment(
         self,
@@ -1230,9 +1228,27 @@ class DiscoveryRepository:
                 raise ValueError(
                     f"Policy pack contains no controls: {framework_code}"
                 )
-            control_results, summary = evaluator(
-                controls, classification_records
-            )
+            raw_eval = evaluator(controls, classification_records)
+            if isinstance(raw_eval, tuple) and len(raw_eval) == 2:
+                control_results, summary = raw_eval
+            elif isinstance(raw_eval, list):
+                control_results, summary = raw_eval, {}
+            else:
+                control_results, summary = [], {}
+
+            summary = summary if isinstance(summary, dict) else {}
+            summary_defaults = {
+                "policy_version": setup.get("catalog_policy_version"),
+                "score": None,
+                "risk_band": "INSUFFICIENT_EVIDENCE",
+                "evidence_coverage": 0.0,
+                "applicable_controls": len(controls),
+                "assessed_controls": 0,
+                "status_counts": {},
+            }
+            summary_defaults.update(summary)
+            summary = summary_defaults
+
             assessment_id = int(connection.execute(
                 assessment_query,
                 {
@@ -1250,7 +1266,22 @@ class DiscoveryRepository:
                 """),
                 {"assessment_id": assessment_id},
             )
-            for control_result in control_results:
+            required_control_fields = {
+                "control_code",
+                "control_title",
+                "assessment_status",
+                "severity",
+                "explanation",
+                "confidence",
+                "needs_human_review",
+            }
+            for control_result in control_results or []:
+                if hasattr(control_result, "model_dump"):
+                    control_result = control_result.model_dump()
+                elif not isinstance(control_result, dict):
+                    continue
+                if not required_control_fields.issubset(control_result):
+                    continue
                 connection.execute(
                     insert_control_query,
                     {
@@ -1549,8 +1580,6 @@ class DiscoveryRepository:
                     "assessment_id": assessment_id,
                     "score": score_payload.get("score"),
                     "risk_band": score_payload["risk_band"],
-                    # Classification evidence exists, but safeguard-control
-                    # evidence is not yet collected by the current HIPAA agent.
                     "evidence_coverage": 0.0,
                     "applicable_controls": phi_count,
                     "assessed_controls": phi_count,
@@ -1735,57 +1764,307 @@ class DiscoveryRepository:
             result = connection.execute(query, {"connection_id": connection_id})
         return result.rowcount > 0
 
-    def get_overview(self, run_id: UUID | str) -> dict[str, Any]:
+    def get_overview(
+        self,
+        run_id: UUID | str,
+    ) -> dict[str, Any]:
+        """
+        Return accurate overview metrics for one Discovery run.
+
+        Framework scores are read from the normalized compliance
+        tables. A framework that is not applicable returns a null
+        score instead of a misleading perfect score.
+        """
+
         base_query = text("""
             SELECT
-              (SELECT COUNT(*) FROM demooc28.discovered_objects
-               WHERE discovery_run_id = CAST(:run_id AS UUID)
-                 AND object_type = 'TABLE') AS tables_scanned,
-              (SELECT COUNT(*) FROM demooc28.discovered_columns
-               WHERE discovery_run_id = CAST(:run_id AS UUID)) AS total_columns,
-              (SELECT COUNT(*) FROM demooc28.dependency_edges
-               WHERE discovery_run_id = CAST(:run_id AS UUID)) AS dependency_count,
-              (SELECT COUNT(*) FROM demooc28.column_classifications
-               WHERE discovery_run_id = CAST(:run_id AS UUID)
-                 AND needs_human_review = TRUE)
-                 AS classifications_needing_review,
-              (SELECT COUNT(*) FROM demooc28.hipaa_findings
-               WHERE discovery_run_id = CAST(:run_id AS UUID)
-                 AND needs_human_review = TRUE)
-                 AS hipaa_findings_needing_review
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.discovered_objects
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                      AND object_type = 'TABLE'
+                ), 0) AS tables_scanned,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.discovered_columns
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                ), 0) AS total_columns,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.dependency_edges
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                ), 0) AS dependency_count,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.column_classifications
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                      AND needs_human_review = TRUE
+                ), 0) AS classifications_needing_review,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.hipaa_findings
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                      AND needs_human_review = TRUE
+                ), 0) AS hipaa_findings_needing_review,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.table_profiles
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                ), 0) AS profiled_tables,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM demooc28.column_profiles
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                ), 0) AS profiled_columns,
+
+                COALESCE((
+                    SELECT AVG(
+                        COALESCE(
+                            average_null_percentage,
+                            0.0
+                        )
+                    )
+                    FROM demooc28.table_profiles
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                ), 0.0) AS average_null_percentage,
+
+                COALESCE((
+                    SELECT AVG(
+                        COALESCE(
+                            null_percentage,
+                            0.0
+                        )
+                    )
+                    FROM demooc28.column_profiles
+                    WHERE discovery_run_id =
+                          CAST(:run_id AS UUID)
+                ), 0.0)
+                    AS average_column_null_percentage
         """)
+
         classification_query = text("""
-            SELECT display_classification, COUNT(*) AS classification_count
+            SELECT
+                display_classification,
+                COUNT(*) AS classification_count
             FROM demooc28.column_classifications
-            WHERE discovery_run_id = CAST(:run_id AS UUID)
+            WHERE discovery_run_id =
+                  CAST(:run_id AS UUID)
             GROUP BY display_classification
         """)
-        score_query = text("""
-            SELECT score, risk_band, phi_columns_checked, severity_counts,
-                   policy_version, calculated_at
-            FROM demooc28.hipaa_scores
-            WHERE discovery_run_id = CAST(:run_id AS UUID)
+
+        selected_frameworks_query = text("""
+            SELECT selected_frameworks
+            FROM demooc28.discovery_runs
+            WHERE discovery_run_id =
+                  CAST(:run_id AS UUID)
         """)
-        params = {"run_id": str(run_id)}
-        with self.database.connect() as connection:
-            base = dict(connection.execute(base_query, params).mappings().one())
-            classifications = connection.execute(
-                classification_query, params
-            ).mappings().all()
-            score = connection.execute(
-                score_query, params
-            ).mappings().one_or_none()
-        counts = {
-            key: 0 for key in ("PUBLIC", "PII", "PHI", "FINANCIAL", "SENSITIVE")
-        }
-        for row in classifications:
-            counts[row["display_classification"]] = int(row["classification_count"])
-        return {
-            **base,
-            "classification_counts": counts,
-            "hipaa_score": dict(score) if score else None,
+
+        framework_scores_query = text("""
+            SELECT DISTINCT ON (
+                framework.framework_code
+            )
+                framework.framework_code
+                    AS framework,
+                score.score AS overall_score,
+                COALESCE(
+                    score.risk_band,
+                    'NOT_ASSESSED'
+                ) AS risk_band,
+                assessment.status
+                    AS assessment_status,
+                assessment.assessment_id,
+                assessment.created_at
+            FROM demooc28.compliance_assessments
+                AS assessment
+
+            JOIN demooc28.compliance_frameworks
+                AS framework
+              ON framework.framework_id =
+                 assessment.framework_id
+
+            LEFT JOIN demooc28.compliance_scores
+                AS score
+              ON score.assessment_id =
+                 assessment.assessment_id
+
+            WHERE assessment.discovery_run_id =
+                  CAST(:run_id AS UUID)
+
+            ORDER BY
+                framework.framework_code,
+                assessment.created_at DESC,
+                assessment.assessment_id DESC
+        """)
+
+        params = {
+            "run_id": str(run_id),
         }
 
+        with self.database.connect() as connection:
+            base = dict(
+                connection.execute(
+                    base_query,
+                    params,
+                ).mappings().one()
+            )
+
+            classification_rows = (
+                connection.execute(
+                    classification_query,
+                    params,
+                ).mappings().all()
+            )
+
+            selected_frameworks_row = (
+                connection.execute(
+                    selected_frameworks_query,
+                    params,
+                ).mappings().one_or_none()
+            )
+
+            framework_score_rows = (
+                connection.execute(
+                    framework_scores_query,
+                    params,
+                ).mappings().all()
+            )
+
+        classification_counts = {
+            "PUBLIC": 0,
+            "PII": 0,
+            "PHI": 0,
+            "FINANCIAL": 0,
+            "SENSITIVE": 0,
+        }
+
+        for row in classification_rows:
+            classification = str(
+                row["display_classification"]
+                or "UNKNOWN"
+            ).strip().upper()
+
+            if classification in classification_counts:
+                classification_counts[
+                    classification
+                ] = int(
+                    row["classification_count"]
+                    or 0
+                )
+
+        raw_selected_frameworks = []
+
+        if selected_frameworks_row:
+            raw_selected_frameworks = (
+                selected_frameworks_row.get(
+                    "selected_frameworks"
+                )
+                or []
+            )
+
+        if isinstance(
+            raw_selected_frameworks,
+            str,
+        ):
+            try:
+                raw_selected_frameworks = (
+                    json.loads(
+                        raw_selected_frameworks
+                    )
+                )
+            except (
+                TypeError,
+                json.JSONDecodeError,
+            ):
+                raw_selected_frameworks = []
+
+        selected_frameworks = []
+
+        for framework in raw_selected_frameworks:
+            framework_code = str(
+                framework or ""
+            ).strip().upper()
+
+            if (
+                framework_code
+                and framework_code
+                not in selected_frameworks
+            ):
+                selected_frameworks.append(
+                    framework_code
+                )
+
+        framework_scores = {
+            framework_code: {
+                "score": None,
+                "risk_band": "NOT_ASSESSED",
+            }
+            for framework_code
+            in selected_frameworks
+        }
+
+        for row in framework_score_rows:
+            framework_code = str(
+                row["framework"] or ""
+            ).strip().upper()
+
+            if not framework_code:
+                continue
+
+            risk_band = str(
+                row["risk_band"]
+                or "NOT_ASSESSED"
+            ).strip().upper()
+
+            raw_score = row[
+                "overall_score"
+            ]
+
+            if (
+                risk_band
+                in {
+                    "NOT_APPLICABLE",
+                    "NOT_ASSESSED",
+                    "INSUFFICIENT_EVIDENCE",
+                }
+                or raw_score is None
+            ):
+                score_value = None
+            else:
+                score_value = str(
+                    raw_score
+                )
+
+            framework_scores[
+                framework_code
+            ] = {
+                "score": score_value,
+                "risk_band": risk_band,
+            }
+
+        return {
+            **base,
+            "classification_counts": (
+                classification_counts
+            ),
+            "framework_scores": (
+                framework_scores
+            ),
+        }
+    
     def get_table_profiles_result(
         self, run_id: UUID | str
     ) -> list[dict[str, Any]]:
@@ -1831,6 +2110,127 @@ class DiscoveryRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def get_classifications_page(
+        self,
+        run_id: UUID | str,
+        *,
+        classification: str | None,
+        search: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        """Return filtered classification rows and full-run category counts."""
+        filters = ["cls.discovery_run_id = CAST(:run_id AS UUID)"]
+        params: dict[str, Any] = {
+            "run_id": str(run_id),
+            "limit": limit,
+            "offset": offset,
+        }
+        if classification and classification.lower() != "all":
+            filters.append(
+                "LOWER(cls.display_classification) = LOWER(:classification)"
+            )
+            params["classification"] = classification
+        if search:
+            filters.append(
+                "(obj.object_name ILIKE :search "
+                "OR col.column_name ILIKE :search)"
+            )
+            params["search"] = f"%{search}%"
+        filter_sql = " AND ".join(filters)
+
+        counts_query = text("""
+            SELECT category, COUNT(*) AS category_count
+            FROM (
+                SELECT CASE UPPER(display_classification)
+                    WHEN 'PUBLIC' THEN 'Public'
+                    WHEN 'PII' THEN 'PII'
+                    WHEN 'PHI' THEN 'PHI'
+                    WHEN 'FINANCIAL' THEN 'Financial'
+                    WHEN 'SENSITIVE' THEN 'Sensitive'
+                    ELSE NULL
+                END AS category
+                FROM demooc28.column_classifications
+                WHERE discovery_run_id = CAST(:run_id AS UUID)
+            ) AS categorized
+            WHERE category IS NOT NULL
+            GROUP BY category
+        """)
+        filtered_count_query = text(f"""
+            SELECT COUNT(*) AS total_count
+            FROM demooc28.column_classifications AS cls
+            JOIN demooc28.discovered_columns AS col
+              ON col.column_id = cls.column_id
+            JOIN demooc28.discovered_objects AS obj
+              ON obj.object_id = col.object_id
+            WHERE {filter_sql}
+        """)
+        page_query = text(f"""
+            SELECT obj.object_name AS table_name,
+                   col.column_name,
+                   col.data_type,
+                   cls.display_classification AS classification,
+                   cls.confidence,
+                   profile.masked_samples AS sample_values
+            FROM demooc28.column_classifications AS cls
+            JOIN demooc28.discovered_columns AS col
+              ON col.column_id = cls.column_id
+            JOIN demooc28.discovered_objects AS obj
+              ON obj.object_id = col.object_id
+            LEFT JOIN demooc28.column_profiles AS profile
+              ON profile.column_id = col.column_id
+             AND profile.discovery_run_id = cls.discovery_run_id
+            WHERE {filter_sql}
+            ORDER BY obj.schema_name, obj.object_name,
+                     col.ordinal_position, col.column_name
+            LIMIT :limit OFFSET :offset
+        """)
+
+        with self.database.connect() as connection:
+            counts_rows = connection.execute(
+                counts_query,
+                {"run_id": str(run_id)},
+            ).mappings().all()
+            count_row = connection.execute(
+                filtered_count_query, params
+            ).mappings().one()
+            rows = connection.execute(
+                page_query, params
+            ).mappings().all()
+
+        counts_by_category = {
+            "Public": 0,
+            "PII": 0,
+            "PHI": 0,
+            "Financial": 0,
+            "Sensitive": 0,
+        }
+        for row in counts_rows:
+            counts_by_category[row["category"]] = int(row["category_count"])
+
+        items = []
+        for row in rows:
+            data = dict(row)
+            samples = data.pop("sample_values", None) or []
+            if isinstance(samples, str):
+                try:
+                    samples = json.loads(samples)
+                except (TypeError, json.JSONDecodeError):
+                    samples = []
+            confidence = data.get("confidence") or 0
+            data["confidence"] = max(
+                0,
+                min(100, round(float(confidence) * 100)),
+            )
+            data["sample_value"] = str(samples[0]) if samples else None
+            items.append(data)
+
+        return {
+            "total_count": int(count_row["total_count"]),
+            "counts_by_category": counts_by_category,
+            "items": items,
+        }
+
     def get_dependencies_result(
         self, run_id: UUID | str, object_id: int | None = None
     ) -> list[dict[str, Any]]:
@@ -1863,6 +2263,29 @@ class DiscoveryRepository:
             params["object_id"] = object_id
         with self.database.connect() as connection:
             rows = connection.execute(query, params).mappings().all()
+        return [dict(row) for row in rows]
+
+    def get_lineage_nodes_result(
+        self,
+        run_id: UUID | str,
+    ) -> list[dict[str, Any]]:
+        query = text("""
+            SELECT obj.object_id, obj.schema_name, obj.object_name,
+                   obj.object_type,
+                   profile.row_count,
+                   obj.object_metadata ->> 'language' AS language
+            FROM demooc28.discovered_objects AS obj
+            LEFT JOIN demooc28.table_profiles AS profile
+              ON profile.object_id = obj.object_id
+             AND profile.discovery_run_id = obj.discovery_run_id
+            WHERE obj.discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY obj.schema_name, obj.object_name, obj.object_type
+        """)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                query,
+                {"run_id": str(run_id)},
+            ).mappings().all()
         return [dict(row) for row in rows]
 
     def upsert_control_evidence(
@@ -2048,15 +2471,23 @@ class DiscoveryRepository:
                     "applicable_controls": applicable,
                     "assessed_controls": assessed,
                     "status_counts": json.dumps(counts),
-                    "metadata": json.dumps({
-                        "minimum_evidence_coverage": 50,
-                        "weights": "EQUAL",
-                        "score_label": "INTERNAL_ASSESSMENT_SCORE",
-                    }),
+                    "metadata": json.dumps(
+                        {
+                            "minimum_evidence_coverage": 50,
+                            "weights": "EQUAL",
+                            "score_label": (
+                                "INTERNAL_ASSESSMENT_SCORE"
+                            ),
+                        }
+                    ),
                 },
             ).mappings().one_or_none()
+
             if row is None:
-                raise ValueError("Compliance score record was not found")
+                raise ValueError(
+                    "Compliance score record was not found"
+                )
+
         return dict(row)
 
     def get_compliance_results(
