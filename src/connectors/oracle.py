@@ -159,6 +159,16 @@ class OracleConnector(DatabaseConnector):
                     object_type=object_type,
                 )
 
+            estimated_size_bytes = 0
+
+            if object_type == "TABLE":
+                estimated_size_bytes = (
+                    self._estimated_table_size_bytes(
+                        schema_name=schema_name,
+                        table_name=object_name,
+                    )
+                )
+
             item = new_object(
                 schema_name=schema_name,
                 object_name=object_name,
@@ -168,6 +178,9 @@ class OracleConnector(DatabaseConnector):
                     "source_object_type": source_type,
                     "created_at": created_at,
                     "last_altered_at": last_ddl_time,
+                    "estimated_size_bytes": (
+                        estimated_size_bytes
+                    ),
                     "enabled": status == "VALID",
                     "materialized": (
                         object_type == "MATERIALIZED_VIEW"
@@ -235,6 +248,65 @@ class OracleConnector(DatabaseConnector):
             discovered_objects=objects,
         )
         return objects
+
+    def _estimated_table_size_bytes(
+        self,
+        schema_name: str,
+        table_name: str,
+    ) -> int:
+        """Return allocated Oracle storage for a table and related segments."""
+        query = """
+            SELECT COALESCE(SUM(segment_info.BYTES), 0)
+            FROM DBA_SEGMENTS segment_info
+            WHERE segment_info.OWNER = :schema_name
+              AND segment_info.SEGMENT_NAME IN (
+                  SELECT :table_name
+                  FROM DUAL
+
+                  UNION
+
+                  SELECT index_info.INDEX_NAME
+                  FROM ALL_INDEXES index_info
+                  WHERE index_info.TABLE_OWNER = :schema_name
+                    AND index_info.TABLE_NAME = :table_name
+
+                  UNION
+
+                  SELECT lob_info.SEGMENT_NAME
+                  FROM ALL_LOBS lob_info
+                  WHERE lob_info.OWNER = :schema_name
+                    AND lob_info.TABLE_NAME = :table_name
+
+                  UNION
+
+                  SELECT lob_info.INDEX_NAME
+                  FROM ALL_LOBS lob_info
+                  WHERE lob_info.OWNER = :schema_name
+                    AND lob_info.TABLE_NAME = :table_name
+              )
+        """
+
+        cursor = self.connection.cursor()
+
+        try:
+            cursor.execute(
+                query,
+                schema_name=schema_name.upper(),
+                table_name=table_name.upper(),
+            )
+            row = cursor.fetchone()
+        except Exception:
+            return 0
+        finally:
+            cursor.close()
+
+        if row is None or row[0] is None:
+            return 0
+
+        try:
+            return max(0, int(row[0]))
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _selection_by_type(
@@ -471,7 +543,7 @@ class OracleConnector(DatabaseConnector):
             triggers.append(trigger)
 
         return triggers
-    
+
     @staticmethod
     def _parse_trigger_properties(
         trigger_type: str,
@@ -525,7 +597,7 @@ class OracleConnector(DatabaseConnector):
             "events": events,
             "orientation": orientation,
         }
-    
+
     @staticmethod
     def _build_trigger_definition(
         description: str | None,
@@ -570,7 +642,7 @@ class OracleConnector(DatabaseConnector):
             return None
 
         return "\n".join(definition_parts)
-         
+
     def _get_object_ddl(
         self,
         schema_name: str,
@@ -629,7 +701,7 @@ class OracleConnector(DatabaseConnector):
             ddl_value = ddl_value.read()
 
         return str(ddl_value)
-    
+
     def _routine_metadata(
         self,
         schema_name: str,
@@ -701,7 +773,7 @@ class OracleConnector(DatabaseConnector):
             "return_type": return_type,
             "materialized": False,
         }
-        
+
     def _columns(self, schema_name: str, object_name: str):
         query = """
             SELECT COLUMN_NAME, COLUMN_ID, DATA_TYPE, NULLABLE, DATA_DEFAULT,
