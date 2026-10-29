@@ -1845,6 +1845,23 @@ class DiscoveryRepository:
                  AND object_type = 'TABLE') AS tables_scanned,
               (SELECT COUNT(*) FROM demooc28.discovered_columns
                WHERE discovery_run_id = CAST(:run_id AS UUID)) AS total_columns,
+              (SELECT COALESCE(
+                   SUM(
+                       CASE
+                           WHEN object_metadata ->> 'estimated_size_bytes'
+                                ~ '^[0-9]+$'
+                           THEN (
+                               object_metadata ->> 'estimated_size_bytes'
+                           )::BIGINT
+                           ELSE 0
+                       END
+                   ),
+                   0
+               )
+               FROM demooc28.discovered_objects
+               WHERE discovery_run_id = CAST(:run_id AS UUID)
+                 AND object_type = 'TABLE')
+                 AS estimated_database_size_bytes,
               (SELECT COUNT(*) FROM demooc28.dependency_edges
                WHERE discovery_run_id = CAST(:run_id AS UUID)) AS dependency_count,
               (SELECT COUNT(*) FROM demooc28.column_classifications
@@ -1876,7 +1893,14 @@ class DiscoveryRepository:
         }
         for row in classifications:
             counts[row["display_classification"]] = int(row["classification_count"])
-
+            estimated_size_bytes = int(
+            base.get("estimated_database_size_bytes") or 0
+        )
+        base["estimated_database_size_bytes"] = estimated_size_bytes
+        base["estimated_database_size_mb"] = round(
+            estimated_size_bytes / (1024 * 1024),
+            2,
+        )
         return {
             **base,
             "classification_counts": counts,
