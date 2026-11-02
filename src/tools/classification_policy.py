@@ -3,12 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.models.enums import DisplayClassification
-from src.tools.compliance_recommendation import normalize_sensitive_data_type
 
-
-# Reference/catalog tables contain standardized business or healthcare values.
-# A value in one of these tables is not person-linked merely because a
-# transactional table references it.
+# Standalone reference catalogs
 REFERENCE_TABLES = {
     "diagnosiscodes",
     "procedurecodes",
@@ -19,20 +15,10 @@ REFERENCE_TABLES = {
     "providernetworks",
 }
 
-# A procedure identifier becomes PHI when its row is linked to a member,
-# claim, authorization, encounter, or another identifiable healthcare event.
+# Transactional tables where medical procedures link to an identifiable person
 PERSON_LINKED_PROCEDURE_TABLES = {
     "claimlines",
     "priorauthorizations",
-}
-
-# NONE is valid only for PUBLIC output. These types provide a deterministic
-# fallback for non-public results that the model returned with NONE.
-GENERIC_TYPE_BY_CLASSIFICATION = {
-    DisplayClassification.PII: "PERSON_IDENTIFIER",
-    DisplayClassification.PHI: "HEALTH_INFORMATION",
-    DisplayClassification.FINANCIAL: "FINANCIAL_INFORMATION",
-    DisplayClassification.SENSITIVE: "FREE_TEXT_SENSITIVE",
 }
 
 
@@ -46,27 +32,15 @@ def _key(value: str | None) -> str:
 def _set(
     result: Any,
     display: DisplayClassification,
-    data_type: str,
-    reason: str,
     *,
     require_review: bool = False,
-    review_reason: str | None = None,
 ) -> None:
     """Apply one internally consistent classification result."""
     result.display_classification = display
-    result.sensitive_data_type = data_type
     result.is_sensitive = display != DisplayClassification.PUBLIC
-    result.sensitivity_level = (
-        "RESTRICTED" if result.is_sensitive else "PUBLIC"
-    )
-    result.reason = reason
 
     if require_review:
         result.needs_human_review = True
-        result.review_reason = (
-            review_reason
-            or "The deterministic policy changed an ambiguous model result."
-        )
 
 
 def _normalize_known_column(
@@ -74,139 +48,86 @@ def _normalize_known_column(
     table: str,
     column: str,
 ) -> bool:
-    """
-    Normalize known identifiers and sensitive fields.
+    """Normalize known identifiers and sensitive fields."""
+    # Clinical and patient summary tables (PHI)
+    if column in {"allergyid", "patientid", "encounterid", "conditionid"}:
+        if any(term in table for term in {"patient", "allergy", "appointment", "summary", "clinical"}):
+            _set(result, DisplayClassification.PHI)
+            return True
 
-    Return True when a deterministic rule was applied.
-    """
-    # Direct personal identifiers.
-    if column in {"ssn", "socialsecuritynumber"}:
-        _set(
-            result,
-            DisplayClassification.PII,
-            "SOCIAL_SECURITY_NUMBER",
-            "The column is an explicit Social Security number field.",
-        )
-        return True
-
-    if column == "firstname":
-        _set(
-            result,
-            DisplayClassification.PII,
-            "FIRST_NAME",
-            "The column contains a person's first name.",
-        )
+    # Direct personal identifiers (PII)
+    if column in {
+        "ssn",
+        "socialsecuritynumber",
+        "firstname",
+        "lastname",
+        "surname",
+        "fullname",
+        "dateofbirth",
+        "dob",
+        "memberid",
+    }:
+        _set(result, DisplayClassification.PII)
         return True
 
-    if column in {"lastname", "surname"}:
-        _set(
-            result,
-            DisplayClassification.PII,
-            "LAST_NAME",
-            "The column contains a person's last name.",
-        )
+    # Healthcare claims and service records (PHI)
+    if column in {
+        "claimlineid",
+        "claimid",
+        "claimnumber",
+        "rxclaimid",
+    }:
+        _set(result, DisplayClassification.PHI)
         return True
 
-    if column == "fullname":
-        _set(
-            result,
-            DisplayClassification.PII,
-            "FULL_NAME",
-            "The column contains a person's full name.",
-        )
+    if column == "dateofservice" and table == "claims":
+        _set(result, DisplayClassification.PHI)
         return True
 
-    if column in {"dateofbirth", "dob"}:
-        _set(
-            result,
-            DisplayClassification.PII,
-            "DATE_OF_BIRTH",
-            "The column contains a person's date of birth.",
-        )
+    if column == "requestdate" and table == "priorauthorizations":
+        _set(result, DisplayClassification.PHI)
         return True
 
-    if column == "memberid":
-        _set(
-            result,
-            DisplayClassification.PII,
-            "MEMBER_IDENTIFIER",
-            "The column identifies a member and is normalized consistently across linked tables.",
-        )
-        return True
-
-    # Healthcare claims and authorization identifiers.
-    if column == "claimlineid":
-        _set(
-            result,
-            DisplayClassification.PHI,
-            "CLAIM_LINE_IDENTIFIER",
-            "The column identifies a line within an identifiable healthcare claim.",
-        )
-        return True
-
-    if column in {"claimid", "claimnumber", "rxclaimid"}:
-        _set(
-            result,
-            DisplayClassification.PHI,
-            "CLAIM_IDENTIFIER",
-            "The column identifies a healthcare claim.",
-        )
-        return True
-
-    if column == "authid":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "AUTHORIZATION_IDENTIFIER",
-            "The column identifies a prior-authorization record.",
-        )
-        return True
-
-    if column == "caseid":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "CASE_IDENTIFIER",
-            "The column identifies an appeals or grievances case.",
-        )
-        return True
-
-    # Banking account fields. AccountID is an internal financial identifier;
-    # AccountNumber is an actual bank-account number.
-    if column == "accountnumber":
-        _set(result, DisplayClassification.FINANCIAL, "BANK_ACCOUNT_NUMBER",
-             "The column explicitly contains a bank-account number.")
-        return True
-    if column in {"accountid", "accounttypeid"}:
-        _set(result, DisplayClassification.FINANCIAL, "FINANCIAL_INFORMATION",
-             "The column is an internal identifier used in a financial-account context.")
-        return True
-    if column in {"currentbalance", "availablebalance", "holdbalance",
-                  "minimumopeningbalance", "minimumdailybalance",
-                  "monthlymaintenancefee", "overdraftlimit", "baseinterestrate"}:
-        _set(result, DisplayClassification.FINANCIAL, "FINANCIAL_INFORMATION",
-             "The column contains financial account information.")
-        return True
-    # Financial identifiers and values.
-    if column in {"paymentid", "claimpaymentid"}:
-        _set(
-            result,
-            DisplayClassification.FINANCIAL,
-            "PAYMENT_IDENTIFIER",
-            "The column identifies a financial payment record.",
-        )
-        return True
-
-    if column == "invoiceid":
-        _set(
-            result,
-            DisplayClassification.FINANCIAL,
-            "INVOICE_IDENTIFIER",
-            "The column identifies a billing invoice.",
-        )
+    # Sensitive administrative / operational
+    if column in {"authid", "caseid"}:
+        _set(result, DisplayClassification.SENSITIVE)
         return True
 
     if column in {
+        "npi",
+        "providerid",
+        "taxid",
+        "brokerid",
+        "groupid",
+        "policyid",
+    } or column == "licensenumber":
+        _set(result, DisplayClassification.SENSITIVE)
+        return True
+
+    if column in {"effectivedate", "terminationdate"} and table == "memberpolicies":
+        _set(result, DisplayClassification.SENSITIVE)
+        return True
+
+    if column == "resolutiondate" and table == "appealsgrievances":
+        _set(result, DisplayClassification.SENSITIVE)
+        return True
+
+    # Financial accounts and amounts
+    if column in {
+        "accountnumber",
+        "accountid",
+        "accounttypeid",
+        "currentbalance",
+        "availablebalance",
+        "holdbalance",
+        "minimumopeningbalance",
+        "minimumdailybalance",
+        "monthlymaintenancefee",
+        "overdraftlimit",
+        "baseinterestrate",
+        "paymentid",
+        "claimpaymentid",
+        "invoiceid",
         "amount",
         "amountapplied",
         "billedamount",
@@ -214,257 +135,46 @@ def _normalize_known_column(
         "totalpaidamount",
         "totalpremium",
         "ingredientcost",
+        "paymentstatus",
     }:
-        _set(
-            result,
-            DisplayClassification.FINANCIAL,
-            "FINANCIAL_AMOUNT",
-            "The column contains a monetary amount.",
-        )
+        _set(result, DisplayClassification.FINANCIAL)
         return True
 
-    if column == "paymentstatus":
-        _set(
-            result,
-            DisplayClassification.FINANCIAL,
-            "PAYMENT_STATUS",
-            "The column contains payment-status information.",
-        )
-        return True
-
-    # Provider, organization, policy, and catalog identifiers.
-    if column in {"npi", "providerid"}:
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "PROVIDER_IDENTIFIER",
-            "The column identifies a healthcare provider, not a patient, and is not PHI by itself.",
-        )
-        return True
-
-    if column == "licenseNumber".lower():
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "LICENSE_NUMBER",
-            "The column contains a professional license number.",
-        )
-        return True
-
-    if column == "taxid":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "TAX_IDENTIFIER",
-            "The column contains a tax identifier.",
-        )
-        return True
-
-    if column == "brokerid":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "BROKER_IDENTIFIER",
-            "The column identifies a broker record.",
-        )
-        return True
-
-    if column == "groupid":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "GROUP_IDENTIFIER",
-            "The column identifies an employer or policy group.",
-        )
-        return True
-
-    if column == "policyid":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "POLICY_IDENTIFIER",
-            "The column identifies a member policy.",
-        )
-        return True
-
-    if column == "planid":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "PLAN_IDENTIFIER",
-            "The column identifies a health-plan catalog record and is not person-linked by itself.",
-        )
-        return True
-
-    if column == "plantypeid":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "PLAN_TYPE_IDENTIFIER",
-            "The column identifies a plan-type catalog record.",
-        )
-        return True
-
-    if column == "facilityid":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "FACILITY_IDENTIFIER",
-            "The column identifies a healthcare facility.",
-        )
-        return True
-
-    if column == "networkid":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "NETWORK_IDENTIFIER",
-            "The column identifies a provider-network record.",
-        )
-        return True
-
-    # Healthcare reference data versus person-linked transaction data.
+    # Reference catalogs vs transactional
     if column == "procedureid":
         if table in PERSON_LINKED_PROCEDURE_TABLES:
-            _set(
-                result,
-                DisplayClassification.PHI,
-                "PROCEDURE_CODE",
-                "The procedure identifier occurs in a member, claim, or authorization context and is person-linked health information.",
-            )
+            _set(result, DisplayClassification.PHI)
         else:
-            _set(
-                result,
-                DisplayClassification.PUBLIC,
-                "PROCEDURE_CODE",
-                "The procedure identifier belongs to reference data and is not person-linked PHI by itself.",
-            )
+            _set(result, DisplayClassification.PUBLIC)
+        return True
+
+    if column in {"planid", "plantypeid", "facilityid", "networkid", "ndccode"}:
+        _set(result, DisplayClassification.PUBLIC)
         return True
 
     if column in {"diagnosisid", "icdcode"} and table == "diagnosiscodes":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "DIAGNOSIS_CODE",
-            "The value belongs to a standalone diagnosis reference catalog and is not person-linked PHI by itself.",
-        )
+        _set(result, DisplayClassification.PUBLIC)
         return True
 
     if column == "code" and table == "procedurecodes":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "PROCEDURE_CODE",
-            "The value belongs to a standalone procedure reference catalog and is not person-linked PHI by itself.",
-        )
+        _set(result, DisplayClassification.PUBLIC)
         return True
 
-    if column == "ndccode":
-        _set(
-            result,
-            DisplayClassification.PUBLIC,
-            "DRUG_CODE",
-            "The column contains a standardized drug code and is not person-linked by itself.",
-        )
-        return True
-
-    # Context-aware dates and free text.
-    if column == "dateofservice" and table == "claims":
-        _set(
-            result,
-            DisplayClassification.PHI,
-            "SERVICE_DATE",
-            "The date is linked to an identifiable healthcare service.",
-        )
-        return True
-
-    if column == "requestdate" and table == "priorauthorizations":
-        _set(
-            result,
-            DisplayClassification.PHI,
-            "SERVICE_DATE",
-            "The request date is linked to an identifiable healthcare authorization.",
-        )
-        return True
-
-    if column in {"effectivedate", "terminationdate"} and table == "memberpolicies":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "POLICY_DATE",
-            "The date is linked to an identifiable member policy.",
-        )
-        return True
-
-    if column == "resolutiondate" and table == "appealsgrievances":
-        _set(
-            result,
-            DisplayClassification.SENSITIVE,
-            "CASE_DATE",
-            "The date is linked to an appeals or grievances case.",
-        )
-        return True
-
+    # Generic description fields
     if column == "description":
-        if table == "diagnosiscodes":
-            _set(
-                result,
-                DisplayClassification.PUBLIC,
-                "DIAGNOSIS_CODE",
-                "The description belongs to a diagnosis reference catalog.",
-            )
-        elif table == "procedurecodes":
-            _set(
-                result,
-                DisplayClassification.PUBLIC,
-                "PROCEDURE_CODE",
-                "The description belongs to a procedure reference catalog.",
-            )
-        elif table in {"plantypes", "pharmacyformularies"}:
-            _set(
-                result,
-                DisplayClassification.PUBLIC,
-                "NONE",
-                "The description belongs to a public reference catalog.",
-            )
+        if table in {"diagnosiscodes", "procedurecodes", "plantypes", "pharmacyformularies"}:
+            _set(result, DisplayClassification.PUBLIC)
+            return True
         elif table == "appealsgrievances":
-            _set(
-                result,
-                DisplayClassification.SENSITIVE,
-                "FREE_TEXT_SENSITIVE",
-                "Free text in an appeals or grievances case may contain sensitive details.",
-                require_review=True,
-                review_reason="Free-text content requires human validation.",
-            )
-        return True
+            _set(result, DisplayClassification.SENSITIVE, require_review=True)
+            return True
 
     return False
 
 
 def _enforce_type_consistency(result: Any) -> None:
-    """Ensure NONE is used only with PUBLIC output."""
-    raw_type = getattr(result.sensitive_data_type, "value", result.sensitive_data_type)
-    normalized_type = str(raw_type or "").strip().upper()
-
-    if result.display_classification == DisplayClassification.PUBLIC:
-        if not normalized_type:
-            result.sensitive_data_type = "NONE"
-        result.is_sensitive = False
-        result.sensitivity_level = "PUBLIC"
-        return
-
-    result.is_sensitive = True
-    result.sensitivity_level = "RESTRICTED"
-
-    if normalized_type in {"", "NONE"}:
-        result.sensitive_data_type = GENERIC_TYPE_BY_CLASSIFICATION[
-            result.display_classification
-        ]
-        result.needs_human_review = True
-        result.review_reason = (
-            result.review_reason
-            or "A non-public classification required a specific sensitive data type."
-        )
+    """Ensure is_sensitive is aligned with display_classification."""
+    result.is_sensitive = result.display_classification != DisplayClassification.PUBLIC
 
 
 def normalize_classification(
@@ -479,38 +189,14 @@ def normalize_classification(
     _normalize_known_column(result, table, column)
     _enforce_type_consistency(result)
 
-    normalized_type, used_fallback = normalize_sensitive_data_type(
-        result.sensitive_data_type
-    )
-    result.sensitive_data_type = normalized_type
-    if used_fallback:
-        result.needs_human_review = True
-        result.review_reason = (
-            result.review_reason
-            or "The model returned a data type outside the approved vocabulary."
-        )
-
     if result.confidence < confidence_threshold:
         result.needs_human_review = True
-        result.review_reason = (
-            result.review_reason
-            or "Confidence below the configured classification threshold."
-        )
 
-    result.inference_basis = list(
-        dict.fromkeys(getattr(result, "inference_basis", []) or [])
-    )
     return result
 
 
 def reconcile_linked_identifiers(results: list[Any], objects: list[dict[str, Any]]):
-    """
-    Reapply canonical rules to both FK endpoints without copying classifications.
-
-    Reference-side and transaction-side columns may intentionally differ. For
-    example, ProcedureCodes.ProcedureID is PUBLIC reference data, while
-    ClaimLines.ProcedureID is PHI because it is linked to a healthcare claim.
-    """
+    """Reapply canonical rules to both FK endpoints."""
     by_key = {
         (result.schema_name, result.table_name, result.column_name): result
         for result in results
