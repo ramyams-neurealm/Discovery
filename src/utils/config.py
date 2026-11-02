@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     app_env: str = "local"
     log_level: str = "INFO"
     api_prefix: str = "/api/v1"
+    allowed_origins: str = ""
 
     # ============================================================
     # PostgreSQL metadata store
