@@ -397,31 +397,69 @@ class ColumnContext(BaseModel):
     table_row_count: int | None = Field(default=None, ge=0)
 
 
+# class ClassificationResult(BaseModel):
+#     """Structured result returned by the classification agent."""
+
+#     object_id: int = Field(gt=0)
+#     schema_name: str
+#     table_name: str
+#     column_name: str
+#     display_classification: DisplayClassification
+#     sensitive_data_type: str = Field(min_length=1, max_length=128)
+#     sensitivity_level: str
+#     is_sensitive: bool
+#     confidence: float = Field(ge=0, le=1)
+#     reason: str = Field(min_length=1)
+#     inference_basis: list[str] = Field(default_factory=list)
+#     needs_human_review: bool
+#     review_reason: str | None = None
+
+# src/models/schemas.py
+
+# class ClassificationResult(BaseModel):
+#     """Cleaned structured result: pure classification without verbose rationale."""
+
+#     object_id: int = Field(gt=0)
+#     schema_name: str
+#     table_name: str
+#     column_name: str
+#     display_classification: DisplayClassification
+#     is_sensitive: bool = True
+#     confidence: float = Field(ge=0, le=1)
+#     needs_human_review: bool = False
+
+#     @model_validator(mode="after")
+#     def ensure_review_reason(self) -> ClassificationResult:
+#         if self.needs_human_review and not self.review_reason:
+#             self.review_reason = "Human review is required."
+
+#         return self
+# In src/models/schemas.py (around line 280)
+
 class ClassificationResult(BaseModel):
-    """Structured result returned by the classification agent."""
+    """Cleaned structured result: pure classification without verbose rationale."""
 
     object_id: int = Field(gt=0)
     schema_name: str
     table_name: str
     column_name: str
     display_classification: DisplayClassification
-    sensitive_data_type: str = Field(min_length=1, max_length=128)
-    sensitivity_level: str
-    is_sensitive: bool
+    is_sensitive: bool = True
     confidence: float = Field(ge=0, le=1)
-    reason: str = Field(min_length=1)
-    inference_basis: list[str] = Field(default_factory=list)
-    needs_human_review: bool
-    review_reason: str | None = None
+    needs_human_review: bool = False
+# Add this below ClassificationResult in src/models/schemas.py
 
-    @model_validator(mode="after")
-    def ensure_review_reason(self) -> ClassificationResult:
-        if self.needs_human_review and not self.review_reason:
-            self.review_reason = "Human review is required."
+class ColumnClassificationItem(BaseModel):
+    """Cleaned structured result for a single column inside a table batch."""
+    column_name: str
+    display_classification: DisplayClassification
+    confidence: float = Field(ge=0, le=1)
+    needs_human_review: bool = False
 
-        return self
-
-
+class TableClassificationBatchResult(BaseModel):
+    """Structured LLM response model for an entire table batch."""
+    table_name: str
+    classifications: list[ColumnClassificationItem] = Field(min_length=1)
 # ============================================================
 # Dependency models
 # ============================================================

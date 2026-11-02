@@ -74,22 +74,37 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
                 "column_profiles": saved_column_profiles,
             }
 
+        # except Exception as error:
+        #     safe_error = f"Metadata discovery failed: {error.__class__.__name__}"
+        #     self.repository.update_stage(
+        #         run_id=run_id,
+        #         stage_name="METADATA_PROFILING",
+        #         stage_status="FAILED",
+        #         message="Metadata discovery and profiling failed",
+        #         error_code="METADATA_DISCOVERY_FAILED",
+        #         error_message=safe_error,
+        #     )
+        #     self.repository.update_run_status(
+        #         run_id=run_id,
+        #         status="FAILED",
+        #         current_stage="METADATA_PROFILING",
+        #         progress_percentage=10,
+        #         error_code="METADATA_DISCOVERY_FAILED",
+        #         error_message=safe_error,
+        #     )
+        #     raise
         except Exception as error:
-            safe_error = f"Metadata discovery failed: {error.__class__.__name__}"
+            import logging
+            logging.getLogger(__name__).exception("METADATA PROFILING DETAILED TRACEBACK:")
+            
+            # Change {error.__class__.__name__} to str(error) so the full reason shows in DBeaver
+            safe = f"Metadata discovery failed: {error}"
             self.repository.update_stage(
                 run_id=run_id,
                 stage_name="METADATA_PROFILING",
                 stage_status="FAILED",
                 message="Metadata discovery and profiling failed",
                 error_code="METADATA_DISCOVERY_FAILED",
-                error_message=safe_error,
-            )
-            self.repository.update_run_status(
-                run_id=run_id,
-                status="FAILED",
-                current_stage="METADATA_PROFILING",
-                progress_percentage=10,
-                error_code="METADATA_DISCOVERY_FAILED",
-                error_message=safe_error,
+                error_message=safe,
             )
             raise

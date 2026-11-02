@@ -331,7 +331,9 @@
 #         }
 #         return self.graph.invoke(initial_state)
 from __future__ import annotations
+import logging
 
+logger = logging.getLogger(__name__)
 import asyncio
 from typing import Any
 from types import SimpleNamespace
@@ -376,6 +378,68 @@ class DiscoverySupervisor:
         )
         return {**state, **output, "status": "RUNNING"}
 
+    # def _classify(self, state: DiscoveryState) -> DiscoveryState:
+    #     run_id = state["discovery_run_id"]
+    #     if "COLUMN_CLASSIFICATION" not in state["effective_scopes"]:
+    #         return state
+
+    #     self.repository.update_run_status(run_id, "RUNNING", "COLUMN_CLASSIFICATION", 40)
+    #     self.repository.update_stage(run_id, "COLUMN_CLASSIFICATION", "RUNNING", "Classifying discovered columns")
+    #     profiles = state.get("column_profiles", [])
+
+    #     try:
+    #         results = []
+    #         keys = (
+    #             "object_id", "column_id", "schema_name", "table_name", "column_name",
+    #             "data_type", "nullable", "is_primary_key", "is_foreign_key",
+    #             "neighboring_columns", "masked_samples", "null_percentage", "distinct_count",
+    #         )
+    #         for profile in profiles:
+    #             results.append(self.classification_agent.classify({key: profile.get(key) for key in keys}))
+
+    #         results = reconcile_linked_identifiers(results, state.get("objects", []))
+    #         summary = build_classification_summary(state.get("objects", []), profiles, results)
+    #         ids = {(p["schema_name"], p["table_name"], p["column_name"]): p["column_id"] for p in profiles}
+    #         saved = self.repository.save_classifications(run_id, results, ids)
+
+    #         message = (
+    #             f"Classified {summary['classified_columns']} of {summary['discovered_columns']} "
+    #             f"discovered columns; {summary['excluded_columns']} excluded because "
+    #             "they had no eligible table profile."
+    #         )
+    #         self.repository.update_stage(
+    #             run_id, "COLUMN_CLASSIFICATION", "COMPLETED", message, len(results), summary["eligible_columns"]
+    #         )
+    #         self.repository.update_run_status(run_id, "RUNNING", "COLUMN_CLASSIFICATION", 60)
+    #         return {
+    #             **state,
+    #             "classifications": results,
+    #             "classification_records": saved,
+    #             "classification_summary": summary,
+    #         }
+    #     # except Exception as error:
+    #     #     safe = f"Column classification failed: {error.__class__.__name__}"
+    #     #     self.repository.update_stage(
+    #     #         run_id, "COLUMN_CLASSIFICATION", "FAILED", "Column classification failed",
+    #     #         error_code="CLASSIFICATION_FAILED", error_message=safe
+    #     #     )
+    #     #     self.repository.update_run_status(
+    #     #         run_id, "FAILED", "COLUMN_CLASSIFICATION", 40, "CLASSIFICATION_FAILED", safe
+    #     #     )
+    #     #     raise
+    #     except Exception as error:
+    #         logger.exception("Column classification failed")  # <--- Prints full traceback to terminal
+    #         safe = f"Column classification failed: {error.__class__.__name__}"
+    #         self.repository.update_stage(
+    #             run_id, "COLUMN_CLASSIFICATION", "FAILED", "Column classification failed",
+    #             error_code="CLASSIFICATION_FAILED", error_message=safe
+    #         )
+    #         self.repository.update_run_status(
+    #             run_id, "FAILED", "COLUMN_CLASSIFICATION", 40, "CLASSIFICATION_FAILED", safe
+    #         )
+    #         raise
+    # Inside src/orchestration/supervisor.py -> _classify()
+    
     def _classify(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
         if "COLUMN_CLASSIFICATION" not in state["effective_scopes"]:
@@ -387,14 +451,24 @@ class DiscoverySupervisor:
 
         try:
             results = []
-            keys = (
-                "object_id", "column_id", "schema_name", "table_name", "column_name",
-                "data_type", "nullable", "is_primary_key", "is_foreign_key",
-                "neighboring_columns", "masked_samples", "null_percentage", "distinct_count",
-            )
-            for profile in profiles:
-                results.append(self.classification_agent.classify({key: profile.get(key) for key in keys}))
+            
+            # 1. Group columns by table
+            tables_map: dict[tuple[str, str, int], list[dict]] = {}
+            for p in profiles:
+                key = (p["schema_name"], p["table_name"], p["object_id"])
+                tables_map.setdefault(key, []).append(p)
+                
+            # 2. Invoke classification once per table chunk
+            for (schema_name, table_name, object_id), cols in tables_map.items():
+                table_results = self.classification_agent.classify_table(
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    object_id=object_id,
+                    columns=cols,
+                )
+                results.extend(table_results)
 
+            # 3. Resume existing reconciliation logic
             results = reconcile_linked_identifiers(results, state.get("objects", []))
             summary = build_classification_summary(state.get("objects", []), profiles, results)
             ids = {(p["schema_name"], p["table_name"], p["column_name"]): p["column_id"] for p in profiles}
@@ -402,8 +476,8 @@ class DiscoverySupervisor:
 
             message = (
                 f"Classified {summary['classified_columns']} of {summary['discovered_columns']} "
-                f"discovered columns; {summary['excluded_columns']} excluded because "
-                "they had no eligible table profile."
+                f"discovered columns across {len(tables_map)} table(s); {summary['excluded_columns']} "
+                "excluded because they had no eligible table profile."
             )
             self.repository.update_stage(
                 run_id, "COLUMN_CLASSIFICATION", "COMPLETED", message, len(results), summary["eligible_columns"]
@@ -416,6 +490,7 @@ class DiscoverySupervisor:
                 "classification_summary": summary,
             }
         except Exception as error:
+            logger.exception("Column classification failed")
             safe = f"Column classification failed: {error.__class__.__name__}"
             self.repository.update_stage(
                 run_id, "COLUMN_CLASSIFICATION", "FAILED", "Column classification failed",
@@ -425,7 +500,6 @@ class DiscoverySupervisor:
                 run_id, "FAILED", "COLUMN_CLASSIFICATION", 40, "CLASSIFICATION_FAILED", safe
             )
             raise
-
     def _dependencies(self, state: DiscoveryState) -> DiscoveryState:
         run_id = state["discovery_run_id"]
         if "DEPENDENCY_MAP" not in state["effective_scopes"]:

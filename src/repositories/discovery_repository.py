@@ -635,6 +635,228 @@ class DiscoveryRepository:
 
         return saved_table_profiles, saved_column_profiles
 
+    # def save_classification(
+    #     self,
+    #     run_id: UUID | str,
+    #     column_id: int,
+    #     result,
+    #     classifier_version: str = "classification-agent-v1",
+    # ) -> int:
+    #     """Insert or update one column-classification result."""
+    #     payload = (
+    #         result.model_dump()
+    #         if hasattr(result, "model_dump")
+    #         else dict(result)
+    #     )
+
+    #     query = text("""
+    #         INSERT INTO demooc28.column_classifications (
+    #             discovery_run_id,
+    #             column_id,
+    #             display_classification,
+    #             sensitive_data_type,
+    #             sensitivity_level,
+    #             is_sensitive,
+    #             confidence,
+    #             reason,
+    #             inference_basis,
+    #             needs_human_review,
+    #             review_reason,
+    #             classifier_type,
+    #             classifier_version,
+    #             evidence_mode,
+    #             verification_status
+    #         )
+    #         VALUES (
+    #             :run_id,
+    #             :column_id,
+    #             :display_classification,
+    #             :sensitive_data_type,
+    #             :sensitivity_level,
+    #             :is_sensitive,
+    #             :confidence,
+    #             :reason,
+    #             CAST(:inference_basis AS jsonb),
+    #             :needs_human_review,
+    #             :review_reason,
+    #             'GPT_4O',
+    #             :classifier_version,
+    #             'SAMPLED_PROFILE',
+    #             'PROVISIONAL'
+    #         )
+    #         ON CONFLICT (discovery_run_id, column_id)
+    #         DO UPDATE SET
+    #             display_classification = EXCLUDED.display_classification,
+    #             sensitive_data_type = EXCLUDED.sensitive_data_type,
+    #             sensitivity_level = EXCLUDED.sensitivity_level,
+    #             is_sensitive = EXCLUDED.is_sensitive,
+    #             confidence = EXCLUDED.confidence,
+    #             reason = EXCLUDED.reason,
+    #             inference_basis = EXCLUDED.inference_basis,
+    #             needs_human_review = EXCLUDED.needs_human_review,
+    #             review_reason = EXCLUDED.review_reason,
+    #             classifier_type = EXCLUDED.classifier_type,
+    #             classifier_version = EXCLUDED.classifier_version,
+    #             evidence_mode = EXCLUDED.evidence_mode,
+    #             verification_status = EXCLUDED.verification_status
+    #         RETURNING classification_id
+    #     """)
+
+    #     display_classification = payload["display_classification"]
+    #     if hasattr(display_classification, "value"):
+    #         display_classification = display_classification.value
+
+    #     sensitivity_level = payload.get("sensitivity_level")
+    #     allowed_sensitivity_levels = {
+    #         "PUBLIC",
+    #         "INTERNAL",
+    #         "CONFIDENTIAL",
+    #         "RESTRICTED",
+    #     }
+    #     if sensitivity_level not in allowed_sensitivity_levels:
+    #         sensitivity_level = (
+    #             "RESTRICTED"
+    #             if payload.get("is_sensitive", False)
+    #             else "PUBLIC"
+    #         )
+
+    #     with self.database.connect() as connection:
+    #         classification_id = connection.execute(
+    #             query,
+    #             {
+    #                 "run_id": str(run_id),
+    #                 "column_id": column_id,
+    #                 "display_classification": display_classification,
+    #                 "sensitive_data_type": payload.get(
+    #                     "sensitive_data_type"
+    #                 ),
+    #                 "sensitivity_level": sensitivity_level,
+    #                 "is_sensitive": payload["is_sensitive"],
+    #                 "confidence": payload["confidence"],
+    #                 "reason": payload["reason"],
+    #                 "inference_basis": json.dumps(
+    #                     payload.get("inference_basis", [])
+    #                 ),
+    #                 "needs_human_review": payload.get(
+    #                     "needs_human_review", False
+    #                 ),
+    #                 "review_reason": payload.get("review_reason"),
+    #                 "classifier_version": classifier_version,
+    #             },
+    #         ).scalar_one()
+
+    #     return int(classification_id)
+    # def save_classification(
+    #     self,
+    #     run_id: UUID | str,
+    #     column_id: int,
+    #     result,
+    #     classifier_version: str = "classification-agent-v1",
+    # ) -> int:
+    #     """Insert or update one column-classification result."""
+    #     payload = (
+    #         result.model_dump()
+    #         if hasattr(result, "model_dump")
+    #         else dict(result)
+    #     )
+
+    #     query = text("""
+    #         INSERT INTO demooc28.column_classifications (
+    #             discovery_run_id,
+    #             column_id,
+    #             display_classification,
+    #             sensitive_data_type,
+    #             sensitivity_level,
+    #             is_sensitive,
+    #             confidence,
+    #             reason,
+    #             inference_basis,
+    #             needs_human_review,
+    #             review_reason,
+    #             classifier_type,
+    #             classifier_version,
+    #             evidence_mode,
+    #             verification_status
+    #         )
+    #         VALUES (
+    #             :run_id,
+    #             :column_id,
+    #             :display_classification,
+    #             :sensitive_data_type,
+    #             :sensitivity_level,
+    #             :is_sensitive,
+    #             :confidence,
+    #             :reason,
+    #             CAST(:inference_basis AS jsonb),
+    #             :needs_human_review,
+    #             :review_reason,
+    #             'GPT_4O',
+    #             :classifier_version,
+    #             'SAMPLED_PROFILE',
+    #             'PROVISIONAL'
+    #         )
+    #         ON CONFLICT (discovery_run_id, column_id)
+    #         DO UPDATE SET
+    #             display_classification = EXCLUDED.display_classification,
+    #             sensitive_data_type = EXCLUDED.sensitive_data_type,
+    #             sensitivity_level = EXCLUDED.sensitivity_level,
+    #             is_sensitive = EXCLUDED.is_sensitive,
+    #             confidence = EXCLUDED.confidence,
+    #             reason = EXCLUDED.reason,
+    #             inference_basis = EXCLUDED.inference_basis,
+    #             needs_human_review = EXCLUDED.needs_human_review,
+    #             review_reason = EXCLUDED.review_reason,
+    #             classifier_type = EXCLUDED.classifier_type,
+    #             classifier_version = EXCLUDED.classifier_version,
+    #             evidence_mode = EXCLUDED.evidence_mode,
+    #             verification_status = EXCLUDED.verification_status
+    #         RETURNING classification_id
+    #     """)
+
+    #     display_classification = payload["display_classification"]
+    #     if hasattr(display_classification, "value"):
+    #         display_classification = display_classification.value
+
+    #     is_sensitive = payload.get("is_sensitive", display_classification != "PUBLIC")
+
+    #     # with self.database.connect() as connection:
+    #     #     classification_id = connection.execute(
+    #     #         query,
+    #     #         {
+    #     #             "run_id": str(run_id),
+    #     #             "column_id": column_id,
+    #     #             "display_classification": display_classification,
+    #     #             "sensitive_data_type": None,
+    #     #             "sensitivity_level": "RESTRICTED" if is_sensitive else "PUBLIC",
+    #     #             "is_sensitive": is_sensitive,
+    #     #             "confidence": payload["confidence"],
+    #     #             "reason": None,
+    #     #             "inference_basis": json.dumps([]),
+    #     #             "needs_human_review": payload.get("needs_human_review", False),
+    #     #             "review_reason": None,
+    #     #             "classifier_version": classifier_version,
+    #     #         },
+    #     #     ).scalar_one()
+    #     # Inside save_classification() in src/repositories/discovery_repository.py
+    #     with self.database.connect() as connection:
+    #         classification_id = connection.execute(
+    #             query,
+    #             {
+    #                 "run_id": str(run_id),
+    #                 "column_id": column_id,
+    #                 "display_classification": display_classification,
+    #                 "sensitive_data_type": None,
+    #                 "sensitivity_level": "RESTRICTED" if payload.get("is_sensitive", False) else "PUBLIC",
+    #                 "is_sensitive": payload.get("is_sensitive", False),
+    #                 "confidence": payload["confidence"],
+    #                 "reason": None,
+    #                 "inference_basis": json.dumps([]),
+    #                 "needs_human_review": payload.get("needs_human_review", False),
+    #                 "review_reason": None,
+    #                 "classifier_version": classifier_version,
+    #             },
+    #         ).scalar_one()
+    #     return int(classification_id)
     def save_classification(
         self,
         run_id: UUID | str,
@@ -654,14 +876,9 @@ class DiscoveryRepository:
                 discovery_run_id,
                 column_id,
                 display_classification,
-                sensitive_data_type,
-                sensitivity_level,
                 is_sensitive,
                 confidence,
-                reason,
-                inference_basis,
                 needs_human_review,
-                review_reason,
                 classifier_type,
                 classifier_version,
                 evidence_mode,
@@ -671,14 +888,9 @@ class DiscoveryRepository:
                 :run_id,
                 :column_id,
                 :display_classification,
-                :sensitive_data_type,
-                :sensitivity_level,
                 :is_sensitive,
                 :confidence,
-                :reason,
-                CAST(:inference_basis AS jsonb),
                 :needs_human_review,
-                :review_reason,
                 'GPT_4O',
                 :classifier_version,
                 'SAMPLED_PROFILE',
@@ -687,14 +899,9 @@ class DiscoveryRepository:
             ON CONFLICT (discovery_run_id, column_id)
             DO UPDATE SET
                 display_classification = EXCLUDED.display_classification,
-                sensitive_data_type = EXCLUDED.sensitive_data_type,
-                sensitivity_level = EXCLUDED.sensitivity_level,
                 is_sensitive = EXCLUDED.is_sensitive,
                 confidence = EXCLUDED.confidence,
-                reason = EXCLUDED.reason,
-                inference_basis = EXCLUDED.inference_basis,
                 needs_human_review = EXCLUDED.needs_human_review,
-                review_reason = EXCLUDED.review_reason,
                 classifier_type = EXCLUDED.classifier_type,
                 classifier_version = EXCLUDED.classifier_version,
                 evidence_mode = EXCLUDED.evidence_mode,
@@ -706,19 +913,7 @@ class DiscoveryRepository:
         if hasattr(display_classification, "value"):
             display_classification = display_classification.value
 
-        sensitivity_level = payload.get("sensitivity_level")
-        allowed_sensitivity_levels = {
-            "PUBLIC",
-            "INTERNAL",
-            "CONFIDENTIAL",
-            "RESTRICTED",
-        }
-        if sensitivity_level not in allowed_sensitivity_levels:
-            sensitivity_level = (
-                "RESTRICTED"
-                if payload.get("is_sensitive", False)
-                else "PUBLIC"
-            )
+        is_sensitive = payload.get("is_sensitive", display_classification != "PUBLIC")
 
         with self.database.connect() as connection:
             classification_id = connection.execute(
@@ -727,26 +922,14 @@ class DiscoveryRepository:
                     "run_id": str(run_id),
                     "column_id": column_id,
                     "display_classification": display_classification,
-                    "sensitive_data_type": payload.get(
-                        "sensitive_data_type"
-                    ),
-                    "sensitivity_level": sensitivity_level,
-                    "is_sensitive": payload["is_sensitive"],
+                    "is_sensitive": is_sensitive,
                     "confidence": payload["confidence"],
-                    "reason": payload["reason"],
-                    "inference_basis": json.dumps(
-                        payload.get("inference_basis", [])
-                    ),
-                    "needs_human_review": payload.get(
-                        "needs_human_review", False
-                    ),
-                    "review_reason": payload.get("review_reason"),
+                    "needs_human_review": payload.get("needs_human_review", False),
                     "classifier_version": classifier_version,
                 },
             ).scalar_one()
 
         return int(classification_id)
-
     def save_classifications(
         self,
         run_id: UUID | str,
@@ -1954,29 +2137,122 @@ class DiscoveryRepository:
             table["column_profiles"] = columns_by_object.get(table["object_id"], [])
 
         return tables
+    # def get_classifications_result(
+    #     self, run_id: UUID | str
+    # ) -> list[dict[str, Any]]:
+    #     query = text("""
+    #         SELECT cls.*, obj.object_id, obj.schema_name,
+    #                obj.object_name AS table_name, col.column_name,
+    #                col.ordinal_position, col.data_type, col.nullable,
+    #                col.is_primary_key, col.is_foreign_key
+    #         FROM demooc28.column_classifications AS cls
+    #         JOIN demooc28.discovered_columns AS col
+    #           ON col.column_id = cls.column_id
+    #         JOIN demooc28.discovered_objects AS obj
+    #           ON obj.object_id = col.object_id
+    #         WHERE cls.discovery_run_id = CAST(:run_id AS UUID)
+    #         ORDER BY obj.schema_name, obj.object_name,
+    #                  col.ordinal_position, col.column_name
+    #     """)
+    #     with self.database.connect() as connection:
+    #         rows = connection.execute(
+    #             query, {"run_id": str(run_id)}
+    #         ).mappings().all()
+    #     return [dict(row) for row in rows]
+
+    # def get_classifications_result(
+    #     self, run_id: UUID | str
+    # ) -> list[dict[str, Any]]:
+    #     query = text("""
+    #         SELECT 
+    #             cls.classification_id,
+    #             cls.discovery_run_id,
+    #             cls.column_id,
+    #             obj.object_id,
+    #             obj.schema_name,
+    #             obj.object_name AS table_name,
+    #             col.column_name,
+    #             col.ordinal_position,
+    #             col.data_type,
+    #             col.nullable,
+    #             col.is_primary_key,
+    #             col.is_foreign_key,
+    #             cls.display_classification,
+    #             cls.is_sensitive,
+    #             cls.confidence,
+    #             cls.needs_human_review,
+    #             cls.classifier_type,
+    #             cls.classifier_version,
+    #             cls.evidence_mode,
+    #             cls.verification_status,
+    #             cls.created_at,
+    #             cls.updated_at
+    #         FROM demooc28.column_classifications AS cls
+    #         JOIN demooc28.discovered_columns AS col
+    #           ON col.column_id = cls.column_id
+    #         JOIN demooc28.discovered_objects AS obj
+    #           ON obj.object_id = col.object_id
+    #         WHERE cls.discovery_run_id = CAST(:run_id AS UUID)
+    #         ORDER BY obj.schema_name, obj.object_name,
+    #                  col.ordinal_position, col.column_name
+    #     """)
+    #     with self.database.connect() as connection:
+    #         rows = connection.execute(
+    #             query, {"run_id": str(run_id)}
+    #         ).mappings().all()
+    #     return [dict(row) for row in rows]
     def get_classifications_result(
         self, run_id: UUID | str
     ) -> list[dict[str, Any]]:
+        """Return a streamlined payload containing only what the UI renders."""
         query = text("""
-            SELECT cls.*, obj.object_id, obj.schema_name,
-                   obj.object_name AS table_name, col.column_name,
-                   col.ordinal_position, col.data_type, col.nullable,
-                   col.is_primary_key, col.is_foreign_key
+            SELECT 
+                cls.classification_id,
+                obj.object_name AS table_name,
+                col.column_name,
+                col.data_type,
+                cls.display_classification,
+                cls.confidence,
+                cls.needs_human_review,
+                cp.masked_samples
             FROM demooc28.column_classifications AS cls
             JOIN demooc28.discovered_columns AS col
               ON col.column_id = cls.column_id
             JOIN demooc28.discovered_objects AS obj
               ON obj.object_id = col.object_id
+            LEFT JOIN demooc28.column_profiles AS cp
+              ON cp.column_id = col.column_id
+             AND cp.discovery_run_id = cls.discovery_run_id
             WHERE cls.discovery_run_id = CAST(:run_id AS UUID)
-            ORDER BY obj.schema_name, obj.object_name,
-                     col.ordinal_position, col.column_name
+            ORDER BY obj.object_name, col.ordinal_position
         """)
+
         with self.database.connect() as connection:
             rows = connection.execute(
                 query, {"run_id": str(run_id)}
             ).mappings().all()
-        return [dict(row) for row in rows]
 
+        results = []
+        for row in rows:
+            samples = row["masked_samples"] or []
+            sample_preview = samples[0] if samples else None
+
+            # Format confidence as an integer percentage (e.g., 0.9500 -> 95)
+            conf_val = float(row["confidence"] or 0)
+            confidence_pct = int(round(conf_val * 100))
+
+            results.append({
+                "classification_id": row["classification_id"],
+                "table_name": row["table_name"],
+                "column_name": row["column_name"],
+                "data_type": row["data_type"],
+                "display_classification": row["display_classification"],
+                "confidence": confidence_pct,
+                "needs_human_review": row["needs_human_review"],
+                "sample": sample_preview,
+            })
+
+        return results
     def get_dependencies_result(
         self, run_id: UUID | str, object_id: int | None = None
     ) -> list[dict[str, Any]]:
