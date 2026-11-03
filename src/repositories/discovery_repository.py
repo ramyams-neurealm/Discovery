@@ -2220,13 +2220,27 @@ class DiscoveryRepository:
                 if column["is_foreign_key"]
             ]
 
+            response_column_profiles = [
+                {
+                    "column_name": column["column_name"],
+                    "data_type": column["data_type"],
+                    "distinct_count": column["distinct_count"],
+                    "mean": column["mean"],
+                }
+                for column in column_profiles
+            ]
+
             results.append({
-                **table,
+                "object_id": table["object_id"],
+                "schema_name": table["schema_name"],
+                "table_name": table["table_name"],
+                "object_type": table["object_type"],
+                "table_profile_id": table["table_profile_id"],
                 "properties": {
                     "rows": table["row_count"],
                     "columns": table["column_count"],
-                    "average_null_rate": (
-                        table["average_null_percentage"]
+                    "average_null_rate": float(
+                        table["average_null_percentage"] or 0
                     ),
                     "primary_key_columns": primary_key_columns,
                     "foreign_key_columns": foreign_key_columns,
@@ -2255,9 +2269,24 @@ class DiscoveryRepository:
                     "memory_size_bytes": estimated_size_bytes,
                     "memory_size_mb": estimated_size_mb,
                 },
-
-
-                "column_profiles": column_profiles,
+                "profiling": {
+                    "method": table["profiling_method"],
+                    "database_vendor": profile_metadata.get(
+                        "database_vendor"
+                    ),
+                    "sample_limit": profile_metadata.get(
+                        "metric_sample_limit"
+                    ),
+                    "row_count_is_sampled": bool(
+                        profile_metadata.get(
+                            "row_count_is_sampled",
+                            False,
+                        )
+                    ),
+                },
+                "column_profiles": response_column_profiles,
+                "created_at": table["created_at"],
+                "updated_at": table["updated_at"],
             })
 
         return results
