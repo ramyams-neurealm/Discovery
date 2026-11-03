@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.utils.data_type_utils import classify_data_type
+
 
 MAX_SAMPLE_VALUES = 3
 _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
@@ -68,6 +70,32 @@ def profile_tables(
             current_profiles.append(profile)
             column_profiles.append(profile)
 
+        numeric_column_count = sum(
+            1
+            for profile in current_profiles
+            if (
+                profile.get("profile_metadata", {}).get(
+                    "data_type_family"
+                )
+                == "NUMERIC"
+            )
+        )
+        other_column_count = sum(
+            1
+            for profile in current_profiles
+            if (
+                profile.get("profile_metadata", {}).get(
+                    "data_type_family"
+                )
+                == "OTHER"
+            )
+        )
+        categorical_column_count = (
+            len(columns)
+            - numeric_column_count
+            - other_column_count
+        )
+
         percentages = [
             profile["null_percentage"]
             for profile in current_profiles
@@ -90,6 +118,11 @@ def profile_tables(
                 "profiling_method": "EXACT",
                 "profile_metadata": {
                     "database_vendor": _vendor(source_connector),
+                    "numeric_column_count": numeric_column_count,
+                    "categorical_column_count": (
+                        categorical_column_count
+                    ),
+                    "other_column_count": other_column_count,
                 },
             }
         )
@@ -106,6 +139,9 @@ def _profile_column(
     all_columns: list[dict[str, Any]],
 ):
     column_name = column["column_name"]
+    data_type_family = classify_data_type(
+        column.get("data_type")
+    )
     table_ref = _table_reference(
         source_connector,
         schema_name,
@@ -134,6 +170,16 @@ def _profile_column(
         f"SELECT COUNT(DISTINCT {comparable_expression}) "
         f"FROM {table_ref} WHERE {column_ref} IS NOT NULL",
     )
+
+    mean = None
+
+    if data_type_family == "NUMERIC":
+        mean = _decimal_scalar(
+            source_connector,
+            f"SELECT AVG({column_ref}) "
+            f"FROM {table_ref} "
+            f"WHERE {column_ref} IS NOT NULL",
+        )
     raw_samples = _sample_values(
         source_connector=source_connector,
         table_ref=table_ref,
@@ -169,6 +215,8 @@ def _profile_column(
             "null_count": null_count,
             "sample_count": len(masked_samples),
             "database_vendor": _vendor(source_connector),
+            "data_type_family": data_type_family,
+            "mean": mean,
         },
     }
 
@@ -303,6 +351,24 @@ def _scalar(source_connector: Any, query: str):
     finally:
         cursor.close()
     return int(row[0]) if row else 0
+
+def _decimal_scalar(
+    source_connector: Any,
+    query: str,
+) -> float | None:
+    """Execute a scalar query and return a rounded decimal value."""
+    cursor = source_connector.connection.cursor()
+
+    try:
+        cursor.execute(query)
+        row = cursor.fetchone()
+    finally:
+        cursor.close()
+
+    if row is None or row[0] is None:
+        return None
+
+    return round(float(row[0]), 4)
 
 
 def _vendor(source_connector: Any):

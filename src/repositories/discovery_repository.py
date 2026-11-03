@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from src.services.database import MetadataDatabase
 from src.tools.hipaa_control_policy import evaluate_hipaa_controls
+from src.utils.data_type_utils import classify_data_type
 
 
 DISCOVERY_STAGES = [
@@ -2116,8 +2117,9 @@ class DiscoveryRepository:
     ) -> list[dict[str, Any]]:
         """Return table profiles enriched with column-level distinct counts."""
         table_query = text("""
-            SELECT obj.object_id, obj.schema_name,
+                        SELECT obj.object_id, obj.schema_name,
                    obj.object_name AS table_name, obj.object_type,
+                   obj.object_metadata,
                    prof.table_profile_id, prof.row_count, prof.column_count,
                    prof.average_null_percentage, prof.profiling_method,
                    prof.profile_metadata, prof.created_at, prof.updated_at
@@ -2130,9 +2132,9 @@ class DiscoveryRepository:
         """)
 
         column_query = text("""
-            SELECT col.object_id, col.column_name, col.data_type,
+            SELECT col.object_id, col.column_name, col.data_type, col.is_primary_key, col.is_foreign_key,
                    cp.distinct_count, cp.distinct_count_is_approximate,
-                   cp.null_percentage
+                   cp.null_percentage, cp.profile_metadata AS column_profile_metadata
             FROM demooc28.column_profiles AS cp
             JOIN demooc28.discovered_columns AS col
               ON col.column_id = cp.column_id
@@ -2148,83 +2150,103 @@ class DiscoveryRepository:
         # Group column-level distinct counts by table object_id
         columns_by_object: dict[int, list[dict[str, Any]]] = {}
         for col in columns:
+            column_profile_metadata = (
+                col.get("column_profile_metadata") or {}
+            )
+            data_type_family = (
+                column_profile_metadata.get("data_type_family")
+                or classify_data_type(col["data_type"])
+            )
             columns_by_object.setdefault(col["object_id"], []).append({
                 "column_name": col["column_name"],
                 "data_type": col["data_type"],
+                "is_primary_key": bool(col["is_primary_key"]),
+                "is_foreign_key": bool(col["is_foreign_key"]),
                 "distinct_count": col["distinct_count"],
                 "distinct_count_is_approximate": col["distinct_count_is_approximate"],
                 "null_percentage": col["null_percentage"],
+                "null_count": int(
+                    column_profile_metadata.get("null_count") or 0
+                ),
+                "data_type_family": data_type_family,
+                "mean": column_profile_metadata.get("mean"),
             })
 
-        # Embed column profiles into parent table payload
+        # Build structured table-profile responses.
+        results: list[dict[str, Any]] = []
+
         for table in tables:
-            table["column_profiles"] = columns_by_object.get(table["object_id"], [])
+            column_profiles = columns_by_object.get(
+                table["object_id"], []
+            )
+            missing_cells = sum(
+                column["null_count"]
+                for column in column_profiles
+            )
+            numeric_column_count = sum(
+                1
+                for column in column_profiles
+                if column["data_type_family"] == "NUMERIC"
+            )
+            other_column_count = sum(
+                1
+                for column in column_profiles
+                if column["data_type_family"] == "OTHER"
+            )
+            categorical_column_count = (
+                len(column_profiles)
+                - numeric_column_count
+                - other_column_count
+            )
+            object_metadata = table.get("object_metadata") or {}
 
-        return tables
-    # def get_classifications_result(
-    #     self, run_id: UUID | str
-    # ) -> list[dict[str, Any]]:
-    #     query = text("""
-    #         SELECT cls.*, obj.object_id, obj.schema_name,
-    #                obj.object_name AS table_name, col.column_name,
-    #                col.ordinal_position, col.data_type, col.nullable,
-    #                col.is_primary_key, col.is_foreign_key
-    #         FROM demooc28.column_classifications AS cls
-    #         JOIN demooc28.discovered_columns AS col
-    #           ON col.column_id = cls.column_id
-    #         JOIN demooc28.discovered_objects AS obj
-    #           ON obj.object_id = col.object_id
-    #         WHERE cls.discovery_run_id = CAST(:run_id AS UUID)
-    #         ORDER BY obj.schema_name, obj.object_name,
-    #                  col.ordinal_position, col.column_name
-    #     """)
-    #     with self.database.connect() as connection:
-    #         rows = connection.execute(
-    #             query, {"run_id": str(run_id)}
-    #         ).mappings().all()
-    #     return [dict(row) for row in rows]
+            estimated_size_bytes = int(
+                object_metadata.get("estimated_size_bytes") or 0
+            )
+            estimated_size_mb = round(
+                estimated_size_bytes / (1024 * 1024),
+                2,
+            )
 
-    # def get_classifications_result(
-    #     self, run_id: UUID | str
-    # ) -> list[dict[str, Any]]:
-    #     query = text("""
-    #         SELECT 
-    #             cls.classification_id,
-    #             cls.discovery_run_id,
-    #             cls.column_id,
-    #             obj.object_id,
-    #             obj.schema_name,
-    #             obj.object_name AS table_name,
-    #             col.column_name,
-    #             col.ordinal_position,
-    #             col.data_type,
-    #             col.nullable,
-    #             col.is_primary_key,
-    #             col.is_foreign_key,
-    #             cls.display_classification,
-    #             cls.is_sensitive,
-    #             cls.confidence,
-    #             cls.needs_human_review,
-    #             cls.classifier_type,
-    #             cls.classifier_version,
-    #             cls.evidence_mode,
-    #             cls.verification_status,
-    #             cls.created_at,
-    #             cls.updated_at
-    #         FROM demooc28.column_classifications AS cls
-    #         JOIN demooc28.discovered_columns AS col
-    #           ON col.column_id = cls.column_id
-    #         JOIN demooc28.discovered_objects AS obj
-    #           ON obj.object_id = col.object_id
-    #         WHERE cls.discovery_run_id = CAST(:run_id AS UUID)
-    #         ORDER BY obj.schema_name, obj.object_name,
-    #                  col.ordinal_position, col.column_name
-    #     """)
-    #     with self.database.connect() as connection:
-    #         rows = connection.execute(
-    #             query, {"run_id": str(run_id)}
-    #         ).mappings().all()
-    #     return [dict(row) for row in rows]
+            primary_key_columns = [
+                column["column_name"]
+                for column in column_profiles
+                if column["is_primary_key"]
+            ]
+            foreign_key_columns = [
+                column["column_name"]
+                for column in column_profiles
+                if column["is_foreign_key"]
+            ]
+
+            results.append({
+                **table,
+                "properties": {
+                    "rows": table["row_count"],
+                    "columns": table["column_count"],
+                    "average_null_rate": (
+                        table["average_null_percentage"]
+                    ),
+                    "primary_key_columns": primary_key_columns,
+                    "foreign_key_columns": foreign_key_columns,
+                    "complexity": object_metadata.get("complexity"),
+                },
+                "data_quality_profile": {
+                    "missing_cells": missing_cells,
+                    "numeric_column_count": numeric_column_count,
+                    "categorical_column_count": (
+                        categorical_column_count
+                    ),
+                    "other_column_count": other_column_count,
+                    "memory_size_bytes": estimated_size_bytes,
+                    "memory_size_mb": estimated_size_mb,
+                },
+
+
+                "column_profiles": column_profiles,
+            })
+
+        return results
     def get_classifications_result(
         self, run_id: UUID | str
     ) -> list[dict[str, Any]]:
