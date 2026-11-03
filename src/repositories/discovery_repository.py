@@ -2199,6 +2199,7 @@ class DiscoveryRepository:
                 - other_column_count
             )
             object_metadata = table.get("object_metadata") or {}
+            profile_metadata = table.get("profile_metadata") or {}
 
             estimated_size_bytes = int(
                 object_metadata.get("estimated_size_bytes") or 0
@@ -2238,6 +2239,19 @@ class DiscoveryRepository:
                         categorical_column_count
                     ),
                     "other_column_count": other_column_count,
+                    "duplicate_row_count": (
+                        profile_metadata.get("duplicate_row_count")
+                    ),
+                    "duplicate_row_percentage": (
+                        profile_metadata.get(
+                            "duplicate_row_percentage"
+                        )
+                    ),
+                    "duplicate_row_count_is_approximate": (
+                        profile_metadata.get(
+                            "duplicate_row_count_is_approximate"
+                        )
+                    ),
                     "memory_size_bytes": estimated_size_bytes,
                     "memory_size_mb": estimated_size_mb,
                 },

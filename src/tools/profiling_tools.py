@@ -96,6 +96,22 @@ def profile_tables(
             - other_column_count
         )
 
+        duplicate_row_count = _duplicate_row_count(
+            source_connector=source_connector,
+            schema_name=schema_name,
+            table_name=table_name,
+            columns=columns,
+        )
+
+        duplicate_row_percentage = (
+            0.0
+            if row_count == 0
+            else round(
+                (duplicate_row_count / row_count) * 100,
+                4,
+            )
+        )
+
         percentages = [
             profile["null_percentage"]
             for profile in current_profiles
@@ -123,6 +139,11 @@ def profile_tables(
                         categorical_column_count
                     ),
                     "other_column_count": other_column_count,
+                                        "duplicate_row_count": duplicate_row_count,
+                    "duplicate_row_percentage": (
+                        duplicate_row_percentage
+                    ),
+                    "duplicate_row_count_is_approximate": False,
                 },
             }
         )
@@ -233,6 +254,50 @@ def _row_count_query(
     )
     return f"SELECT COUNT(*) FROM {table_ref}"
 
+def _duplicate_row_count(
+    source_connector: Any,
+    schema_name: str,
+    table_name: str,
+    columns: list[dict[str, Any]],
+) -> int:
+    """Count rows that duplicate another complete table row."""
+    if not columns:
+        return 0
+
+    table_ref = _table_reference(
+        source_connector,
+        schema_name,
+        table_name,
+    )
+
+    comparable_columns = []
+
+    for column in columns:
+        column_ref = _quote_identifier(
+            source_connector,
+            column["column_name"],
+        )
+        comparable_columns.append(
+            _distinct_expression(
+                source_connector=source_connector,
+                column=column,
+                column_ref=column_ref,
+            )
+        )
+
+    group_by_columns = ", ".join(comparable_columns)
+
+    query = (
+        "SELECT COALESCE(SUM(duplicate_count - 1), 0) "
+        "FROM ("
+        "SELECT COUNT(*) AS duplicate_count "
+        f"FROM {table_ref} "
+        f"GROUP BY {group_by_columns} "
+        "HAVING COUNT(*) > 1"
+        ") AS duplicate_groups"
+    )
+
+    return _scalar(source_connector, query)
 
 def _distinct_expression(
     source_connector: Any,
