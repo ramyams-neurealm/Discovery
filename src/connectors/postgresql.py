@@ -22,7 +22,7 @@ class PostgreSQLConnector(DatabaseConnector):
             dbname=self.config["database_name"],
             user=self.config["username"],
             password=self.password,
-            sslmode="require" if self.config.get("ssl_enabled") else "prefer",
+            sslmode="prefer" if self.config.get("ssl_enabled") else "disable",
             connect_timeout=10,
         )
         return self.connection
