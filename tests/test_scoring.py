@@ -25,4 +25,4 @@ def test_score_is_deterministic():
     first = calculate_hipaa_score(findings)
     second = calculate_hipaa_score(findings)
     assert first == second
-    assert first.score == 51.25
+    assert first.score == 61.25

@@ -1,9 +1,10 @@
+import pytest
 from src.policies.compliance_mapping import (
     filter_columns_for_framework,
     map_column_to_frameworks,
 )
 
-# Simulated Stage 3 outputs
+# Simulated Stage 3 classified columns
 test_columns = [
     {
         "column_name": "pt_ssn",
@@ -37,18 +38,51 @@ test_columns = [
     },
 ]
 
-print("--- Testing map_column_to_frameworks ---")
-for col in test_columns:
-    frameworks = map_column_to_frameworks(
-        display_classification=col["display_classification"],
-        sensitive_data_type=col["sensitive_data_type"],
-        is_sensitive=col["is_sensitive"],
+
+def test_map_column_to_frameworks_phi():
+    matched = map_column_to_frameworks(
+        display_classification="PHI",
+        is_sensitive=True,
     )
-    print(f"Column '{col['column_name']}': {frameworks}")
+    assert "HIPAA" in matched
+    assert "GDPR" in matched
+    # CCPA statutorily carves out HIPAA-governed PHI
+    assert "CCPA" not in matched
 
-print("\n--- Testing filter_columns_for_framework ---")
-hipaa_cols = filter_columns_for_framework("HIPAA", test_columns)
-pci_cols = filter_columns_for_framework("PCI_DSS", test_columns)
 
-print(f"HIPAA In-Scope: {[c['column_name'] for c in hipaa_cols]}")
-print(f"PCI_DSS In-Scope: {[c['column_name'] for c in pci_cols]}")
+def test_map_column_to_frameworks_financial():
+    matched = map_column_to_frameworks(
+        display_classification="FINANCIAL",
+        is_sensitive=True,
+    )
+    assert "PCI_DSS" in matched
+    assert "GLBA" in matched
+    assert "GDPR" in matched
+    assert "HIPAA" not in matched
+
+
+def test_map_column_public_not_sensitive():
+    matched = map_column_to_frameworks(
+        display_classification="PUBLIC",
+        is_sensitive=False,
+    )
+    assert matched == []
+
+
+def test_filter_columns_for_hipaa():
+    hipaa_cols = filter_columns_for_framework("HIPAA", test_columns)
+    column_names = [c["column_name"] for c in hipaa_cols]
+    assert column_names == ["mrn_id"]
+
+
+def test_filter_columns_for_pci_dss():
+    pci_cols = filter_columns_for_framework("PCI_DSS", test_columns)
+    column_names = [c["column_name"] for c in pci_cols]
+    assert column_names == ["card_number"]
+
+
+def test_filter_columns_for_gdpr():
+    gdpr_cols = filter_columns_for_framework("GDPR", test_columns)
+    column_names = [c["column_name"] for c in gdpr_cols]
+    # GDPR covers PII, PHI, FINANCIAL, SENSITIVE
+    assert set(column_names) == {"pt_ssn", "dob", "card_number", "mrn_id"}

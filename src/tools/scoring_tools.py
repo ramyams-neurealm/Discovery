@@ -4,9 +4,9 @@ from src.models.schemas import HipaaFinding, HipaaScore
 
 SCORES = {
     HipaaSeverity.GOOD: 100.0,
-    HipaaSeverity.NEEDS_REVIEW: 70.0,
-    HipaaSeverity.SERIOUS: 35.0,
-    HipaaSeverity.CRITICAL: 0.0,
+    HipaaSeverity.NEEDS_REVIEW: 75.0,
+    HipaaSeverity.SERIOUS: 50.0,
+    HipaaSeverity.CRITICAL: 20.0,
 }
 
 
@@ -22,9 +22,9 @@ def calculate_hipaa_score(findings: list[HipaaFinding]) -> HipaaScore:
     score = sum(SCORES[f.severity] for f in findings) / len(findings)
     if score >= 85:
         band = "GOOD"
-    elif score >= 60:
+    elif score >= 65:
         band = "NEEDS_REVIEW"
-    elif score >= 30:
+    elif score >= 40:
         band = "SERIOUS"
     else:
         band = "CRITICAL"

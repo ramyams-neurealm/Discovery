@@ -10,7 +10,7 @@ from src.policies.compliance_mapping import filter_columns_for_framework
 
 
 def calculate_metrics(evaluations: list[Any]) -> FrameworkMetrics:
-    """Calculates penalty deductions and assigns the risk band."""
+    """Calculates weighted average score and assigns the risk band per mock specification."""
     n = len(evaluations)
     if n == 0:
         return FrameworkMetrics(
@@ -20,21 +20,29 @@ def calculate_metrics(evaluations: list[Any]) -> FrameworkMetrics:
             critical_count=0,
             serious_count=0,
             needs_review_count=0,
+            good_count=0,
         )
 
-    critical_count = sum(1 for e in evaluations if e.status == "Critical")
-    serious_count = sum(1 for e in evaluations if e.status == "Serious")
-    review_count = sum(1 for e in evaluations if e.status == "Needs review")
+    weights = {
+        "Good": 100.0,
+        "Needs review": 75.0,
+        "Serious": 50.0,
+        "Critical": 20.0,
+    }
 
-    total_penalty = (critical_count * 25) + (serious_count * 15) + (review_count * 5)
-    raw_score = 100.0 - (total_penalty / n)
-    score = max(0, min(100, round(raw_score)))
+    good_count = sum(1 for e in evaluations if getattr(e, "status", None) == "Good")
+    review_count = sum(1 for e in evaluations if getattr(e, "status", None) == "Needs review")
+    serious_count = sum(1 for e in evaluations if getattr(e, "status", None) == "Serious")
+    critical_count = sum(1 for e in evaluations if getattr(e, "status", None) == "Critical")
+
+    total_score = sum(weights.get(getattr(e, "status", "Needs review"), 75.0) for e in evaluations)
+    score = max(0, min(100, round(total_score / n)))
 
     if score >= 85:
         risk_band = RiskBand.GOOD
-    elif score >= 60:
+    elif score >= 65:
         risk_band = RiskBand.MODERATE_RISK
-    elif score >= 30:
+    elif score >= 40:
         risk_band = RiskBand.SERIOUS_RISK
     else:
         risk_band = RiskBand.CRITICAL_RISK
@@ -46,6 +54,7 @@ def calculate_metrics(evaluations: list[Any]) -> FrameworkMetrics:
         critical_count=critical_count,
         serious_count=serious_count,
         needs_review_count=review_count,
+        good_count=good_count,
     )
 
 
@@ -71,21 +80,28 @@ class ComplianceService:
         tasks = []
         framework_order: list[str] = []
 
+        empty_framework_results: list[FrameworkAssessmentResult] = []
+
         for fw in selected_frameworks:
             fw_code = fw.upper().strip()
             in_scope_cols = filter_columns_for_framework(fw_code, classified_columns)
-            
-            # If no sensitive columns are in scope for this framework, skip LLM calls
+
+            # If no sensitive columns are in scope for this framework, return explicit compliant/empty card
             if not in_scope_cols:
+                empty_metrics = calculate_metrics([])
+                empty_framework_results.append(
+                    FrameworkAssessmentResult(
+                        framework_code=fw_code,
+                        metrics=empty_metrics,
+                        findings=[],
+                    )
+                )
                 continue
 
             tasks.append(
                 self.agent.evaluate_framework_async(fw_code, table_name, in_scope_cols)
             )
             framework_order.append(fw_code)
-
-        if not tasks:
-            return []
 
         # Step 2: Execute all requested framework evaluations concurrently
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -116,8 +132,9 @@ class ComplianceService:
             # Step 4: Persist to PostgreSQL if DB session is available
             if self.db:
                 self._persist_assessment(discovery_run_id, table_name, result)
-
+        completed_results.extend(empty_framework_results)
         return completed_results
+        
 
     def _persist_assessment(
         self,

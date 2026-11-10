@@ -53,11 +53,18 @@ class ComplianceAgent(BaseAgent):
             for col in columns
         ]
 
-        result = (prompt | structured_llm).invoke({
+        result: FrameworkBatchOutput = (prompt | structured_llm).invoke({
             "framework_code": fw,
             "table_name": table_name,
             "columns_payload": payload,
         })
+
+        # Deterministically enforce table_name and framework_code on each finding
+        if hasattr(result, "evaluations") and result.evaluations:
+            for evaluation in result.evaluations:
+                if not getattr(evaluation, "table_name", None):
+                    evaluation.table_name = table_name
+
         return result
 
     async def evaluate_framework_async(

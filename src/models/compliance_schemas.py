@@ -18,9 +18,10 @@ class RiskBand(str, Enum):
 
 class ColumnComplianceFinding(BaseModel):
     """Evaluation result for a single column under a specific framework."""
+    table_name: str = Field(default="", description="Name of the table containing the column")
     column_name: str = Field(description="Name of the evaluated column")
-    status: Literal["Critical", "Serious", "Needs review"] = Field(
-        description="Must be strictly Critical, Serious, or Needs review"
+    status: Literal["Good", "Needs review", "Serious", "Critical"] = Field(
+        description="Must be strictly Good, Needs review, Serious, or Critical"
     )
     finding: str = Field(
         description="Clear statutory violation explanation citing the framework context"
@@ -45,6 +46,7 @@ class FrameworkMetrics(BaseModel):
     critical_count: int
     serious_count: int
     needs_review_count: int
+    good_count: int = 0
 
 
 class FrameworkAssessmentResult(BaseModel):
