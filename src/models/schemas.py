@@ -444,6 +444,7 @@ class ClassificationResult(BaseModel):
     table_name: str
     column_name: str
     display_classification: DisplayClassification
+    sensitive_data_type: str | None = None
     is_sensitive: bool = True
     confidence: float = Field(ge=0, le=1)
     needs_human_review: bool = False
@@ -453,6 +454,7 @@ class ColumnClassificationItem(BaseModel):
     """Cleaned structured result for a single column inside a table batch."""
     column_name: str
     display_classification: DisplayClassification
+    sensitive_data_type: str | None = None
     confidence: float = Field(ge=0, le=1)
     needs_human_review: bool = False
 
