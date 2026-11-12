@@ -878,6 +878,12 @@ class DiscoverySupervisor:
                     "framework_code": fw_code,
                     "score": metrics.score,
                     "risk_band": str(getattr(metrics.risk_band, "value", metrics.risk_band)),
+                    "assessment_status": str(getattr(metrics.assessment_status, "value", metrics.assessment_status)),
+                    "good_count": metrics.good_count,
+                    "in_scope_count": metrics.total_in_scope,
+                    "critical_count": metrics.critical_count,
+                    "serious_count": metrics.serious_count,
+                    "needs_review_count": metrics.needs_review_count,
                     "findings_count": len(all_findings),
                     "findings": [vars(f) for f in all_findings],
                 })
