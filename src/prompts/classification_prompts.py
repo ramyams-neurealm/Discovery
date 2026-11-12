@@ -42,9 +42,19 @@ CONFIDENCE & HUMAN REVIEW SCORING GUIDELINES:
   * Free-text or comment fields ('notes', 'comments', 'description') exist in tables holding sensitive records, where mixed content is likely.
   * It is uncertain whether a table represents standalone reference definitions (PUBLIC) or person-linked transactional data.
 
+SENSITIVE DATA SUBTYPES (sensitive_data_type):
+When a column represents a specific regulated or identifiable data element, also emit a canonical UPPERCASE sensitive_data_type (otherwise null):
+- Payment / Cardholder Data: CREDIT_CARD_NUMBER, CVV, CARD_EXPIRATION, CARDHOLDER_NAME, PIN_BLOCK
+- Financial Accounts: BANK_ACCOUNT_NUMBER, ROUTING_NUMBER, IBAN
+- Government / National IDs: SSN, TAX_IDENTIFIER, IN_AADHAAR, IN_PAN, PASSPORT_NUMBER, DRIVERS_LICENSE
+- Personal Identifiers: FULL_NAME, FIRST_NAME, LAST_NAME, EMAIL_ADDRESS, PHONE_NUMBER, DATE_OF_BIRTH, PHYSICAL_ADDRESS, IP_ADDRESS
+- Clinical / Healthcare: MRN, DIAGNOSIS_CODE, PROCEDURE_CODE, MEDICATION_NAME
+- Credentials / Secrets: PASSWORD_HASH, API_TOKEN, SECRET_KEY
+- Generic operational/metadata or PUBLIC columns: null
+
 STRICT CONSTRAINTS:
-Output ONLY structured values for: display_classification, confidence, and needs_human_review.
-Do NOT output reasoning text, inference explanations, or sub-types.
+Output ONLY structured values for: display_classification, sensitive_data_type, confidence, and needs_human_review.
+Do NOT output reasoning text or conversational explanations.
 """.strip()
 
 
@@ -63,6 +73,16 @@ EVALUATION HIERARCHY:
 1. Domain Context: Use schema_name and table_name to anchor the domain. Clinical/patient tables imply PHI for dates, diagnoses, and patient IDs. Financial tables imply FINANCIAL for monetary quantities and fee codes.
 2. Masked Samples: Use masked_samples as ground-truth evidence to override ambiguous column names (e.g., a column named 'notes' containing masked emails or SSNs).
 3. Calibration: Assign confidence between 0.0 and 1.0. Set needs_human_review = true only when column naming and samples are genuinely ambiguous or free-form.
+
+SENSITIVE DATA SUBTYPES (sensitive_data_type):
+When a column represents a specific regulated or identifiable data element, also populate `sensitive_data_type` using canonical UPPERCASE labels (otherwise null):
+- Payment / Cardholder Data: CREDIT_CARD_NUMBER, CVV, CARD_EXPIRATION, CARDHOLDER_NAME, PIN_BLOCK
+- Financial Accounts: BANK_ACCOUNT_NUMBER, ROUTING_NUMBER, IBAN
+- Government / National IDs: SSN, TAX_IDENTIFIER, IN_AADHAAR, IN_PAN, PASSPORT_NUMBER, DRIVERS_LICENSE
+- Personal Identifiers: FULL_NAME, FIRST_NAME, LAST_NAME, EMAIL_ADDRESS, PHONE_NUMBER, DATE_OF_BIRTH, PHYSICAL_ADDRESS, IP_ADDRESS
+- Clinical / Healthcare: MRN, DIAGNOSIS_CODE, PROCEDURE_CODE, MEDICATION_NAME
+- Credentials / Secrets: PASSWORD_HASH, API_TOKEN, SECRET_KEY
+- Generic operational/metadata or PUBLIC columns: null
 
 STRICT INSTRUCTIONS:
 - You must return an entry in `classifications` for EVERY column supplied in the input.

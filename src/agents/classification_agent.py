@@ -95,11 +95,13 @@ class DataClassificationAgent(BaseAgent):
 
             if classified_item:
                 display_cls = classified_item.display_classification
+                subtype = classified_item.sensitive_data_type
                 conf = classified_item.confidence
                 review = classified_item.needs_human_review
             else:
                 # Defensive fallback if the LLM hallucinated or skipped a column
                 display_cls = DisplayClassification.PUBLIC
+                subtype = None
                 conf = 0.50
                 review = True
 
@@ -109,6 +111,7 @@ class DataClassificationAgent(BaseAgent):
                 table_name=table_name,
                 column_name=col_name,
                 display_classification=display_cls,
+                sensitive_data_type=subtype,
                 is_sensitive=(display_cls != DisplayClassification.PUBLIC),
                 confidence=conf,
                 needs_human_review=review,

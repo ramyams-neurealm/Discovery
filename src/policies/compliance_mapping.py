@@ -20,6 +20,7 @@ PCI_DSS_CARDHOLDER_DATA_TYPES: set[str] = {
     "CREDIT_CARD_NUMBER",
     "PAN",
     "PRIMARY_ACCOUNT_NUMBER",
+    "CARDHOLDER_NAME",
     "CVV",
     "CVC",
     "CID",
@@ -66,7 +67,7 @@ def map_column_to_frameworks(
 
         # PCI-DSS scope check: must be explicitly identified cardholder/auth data
         if fw == "PCI_DSS":
-            if category == "FINANCIAL" and subtype in PCI_DSS_CARDHOLDER_DATA_TYPES:
+            if category in ("FINANCIAL", "PII") and subtype in PCI_DSS_CARDHOLDER_DATA_TYPES:
                 matched.append(fw)
             continue
 

@@ -29,15 +29,49 @@ def _key(value: str | None) -> str:
     return "".join(character for character in value.lower() if character.isalnum())
 
 
+def _normalize_subtype(raw_subtype: Any) -> str | None:
+    """Canonicalize sensitive_data_type strings and filter empty/NONE tokens."""
+    if raw_subtype is None:
+        return None
+    if hasattr(raw_subtype, "value"):
+        raw_subtype = raw_subtype.value
+    cleaned = str(raw_subtype).strip().upper().replace("-", "_").replace(" ", "_")
+    if cleaned in {"", "NONE", "NULL", "N/A", "NA", "UNKNOWN", "GENERIC"}:
+        return None
+    aliases = {
+        "PAN": "CREDIT_CARD_NUMBER",
+        "PRIMARY_ACCOUNT_NUMBER": "CREDIT_CARD_NUMBER",
+        "CREDIT_CARD": "CREDIT_CARD_NUMBER",
+        "CARD_NUMBER": "CREDIT_CARD_NUMBER",
+        "CVC": "CVV",
+        "CID": "CVV",
+        "EXPIRATION_DATE": "CARD_EXPIRATION",
+        "EXPIRY_DATE": "CARD_EXPIRATION",
+        "CARD_EXPIRY": "CARD_EXPIRATION",
+        "PIN": "PIN_BLOCK",
+        "SOCIAL_SECURITY_NUMBER": "SSN",
+        "ACCOUNT_NUMBER": "BANK_ACCOUNT_NUMBER",
+        "DOB": "DATE_OF_BIRTH",
+        "EMAIL": "EMAIL_ADDRESS",
+        "PHONE": "PHONE_NUMBER",
+    }
+    return aliases.get(cleaned, cleaned)
+
+
 def _set(
     result: Any,
     display: DisplayClassification,
     *,
+    subtype: str | None = None,
     require_review: bool = False,
 ) -> None:
     """Apply one internally consistent classification result."""
     result.display_classification = display
     result.is_sensitive = display != DisplayClassification.PUBLIC
+    if display == DisplayClassification.PUBLIC:
+        result.sensitive_data_type = None
+    elif subtype is not None:
+        result.sensitive_data_type = subtype
 
     if require_review:
         result.needs_human_review = True
@@ -55,18 +89,49 @@ def _normalize_known_column(
             _set(result, DisplayClassification.PHI)
             return True
 
+    # Payment cardholder and authentication data (PCI-DSS)
+    if column in {"cardnumber", "cardnumberencrypted", "pan", "primaryaccountnumber", "creditcardnumber"}:
+        _set(result, DisplayClassification.FINANCIAL, subtype="CREDIT_CARD_NUMBER")
+        return True
+
+    if column in {"cvv", "cvvencrypted", "cvc", "cvc2", "cid"}:
+        _set(result, DisplayClassification.FINANCIAL, subtype="CVV")
+        return True
+
+    if column in {"expirydate", "cardexpiry", "cardexpiration", "expirationdate"}:
+        _set(result, DisplayClassification.FINANCIAL, subtype="CARD_EXPIRATION")
+        return True
+
+    if column in {"cardholdername", "nameoncard"}:
+        _set(result, DisplayClassification.PII, subtype="CARDHOLDER_NAME")
+        return True
+
+    if column in {"pin", "pinblock", "encryptedpin"}:
+        _set(result, DisplayClassification.FINANCIAL, subtype="PIN_BLOCK")
+        return True
+
     # Direct personal identifiers (PII)
-    if column in {
-        "ssn",
-        "socialsecuritynumber",
-        "firstname",
-        "lastname",
-        "surname",
-        "fullname",
-        "dateofbirth",
-        "dob",
-        "memberid",
-    }:
+    if column in {"ssn", "socialsecuritynumber"}:
+        _set(result, DisplayClassification.PII, subtype="SSN")
+        return True
+
+    if column == "firstname":
+        _set(result, DisplayClassification.PII, subtype="FIRST_NAME")
+        return True
+
+    if column in {"lastname", "surname"}:
+        _set(result, DisplayClassification.PII, subtype="LAST_NAME")
+        return True
+
+    if column == "fullname":
+        _set(result, DisplayClassification.PII, subtype="FULL_NAME")
+        return True
+
+    if column in {"dateofbirth", "dob"}:
+        _set(result, DisplayClassification.PII, subtype="DATE_OF_BIRTH")
+        return True
+
+    if column == "memberid":
         _set(result, DisplayClassification.PII)
         return True
 
@@ -113,8 +178,11 @@ def _normalize_known_column(
         return True
 
     # Financial accounts and amounts
+    if column == "accountnumber":
+        _set(result, DisplayClassification.FINANCIAL, subtype="BANK_ACCOUNT_NUMBER")
+        return True
+
     if column in {
-        "accountnumber",
         "accountid",
         "accounttypeid",
         "currentbalance",
@@ -173,8 +241,12 @@ def _normalize_known_column(
 
 
 def _enforce_type_consistency(result: Any) -> None:
-    """Ensure is_sensitive is aligned with display_classification."""
+    """Ensure is_sensitive and sensitive_data_type are aligned with display_classification."""
     result.is_sensitive = result.display_classification != DisplayClassification.PUBLIC
+    if not result.is_sensitive:
+        result.sensitive_data_type = None
+    elif hasattr(result, "sensitive_data_type"):
+        result.sensitive_data_type = _normalize_subtype(result.sensitive_data_type)
 
 
 def normalize_classification(

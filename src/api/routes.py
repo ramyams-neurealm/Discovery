@@ -678,6 +678,41 @@ def get_compliance_results(
         "frameworks": results,
     }
 
+
+@router.patch("/discovery-runs/{run_id}/compliance-findings/remediate")
+def remediate_compliance_finding(
+    run_id: UUID,
+    payload: Any = Body(...),
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    from src.models.compliance_schemas import RemediateFindingRequest
+    from src.repositories.compliance_repository import ComplianceRepository
+
+    request = RemediateFindingRequest.model_validate(payload)
+    repository = _get_repository(database)
+    _require_discovery_run(repository, run_id)
+
+    comp_repo = ComplianceRepository(database)
+    result = comp_repo.remediate_finding_across_frameworks(
+        discovery_run_id=run_id,
+        table_name=request.table_name,
+        column_name=request.column_name,
+        remediation_action=request.remediation_action,
+        remediated_by=request.remediated_by,
+        remediation_notes=request.remediation_notes,
+    )
+
+    if result["remediated_findings_count"] == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No compliance findings found for {request.table_name}.{request.column_name} "
+                f"in discovery run {run_id}"
+            ),
+        )
+
+    return result
+
 # @router.get("/discovery-runs/{run_id}/compliance-results")
 # def get_compliance_results(
 #     run_id: UUID,

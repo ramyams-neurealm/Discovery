@@ -63,3 +63,30 @@ class FrameworkAssessmentResult(BaseModel):
     framework_code: str
     metrics: FrameworkMetrics
     findings: list[ColumnComplianceFinding]
+
+
+class RemediateFindingRequest(BaseModel):
+    table_name: str = Field(min_length=1)
+    column_name: str = Field(min_length=1)
+    remediation_action: str = Field(min_length=1, max_length=64)
+    remediated_by: str | None = Field(default=None, max_length=128)
+    remediation_notes: str | None = None
+
+
+class RemediatedFrameworkSummary(BaseModel):
+    framework_code: str
+    finding_id: int
+    original_status: str
+    is_remediated: bool = True
+    remediation_action: str
+    remediated_by: str | None = None
+    remediated_at: str | None = None
+    updated_metrics: FrameworkMetrics
+
+
+class RemediateFindingResponse(BaseModel):
+    discovery_run_id: str
+    table_name: str
+    column_name: str
+    remediated_findings_count: int
+    frameworks_updated: list[RemediatedFrameworkSummary]

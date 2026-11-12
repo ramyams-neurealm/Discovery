@@ -586,6 +586,10 @@ class ComplianceRepository:
                 recommendation_text,
                 needs_human_review,
                 is_remediated,
+                remediation_action,
+                remediated_by,
+                remediated_at,
+                remediation_notes,
                 created_at
             FROM demooc28.compliance_findings
             WHERE assessment_id = :assessment_id
@@ -620,3 +624,157 @@ class ComplianceRepository:
                 results.append(assessment_data)
 
         return results
+
+    def remediate_finding_across_frameworks(
+        self,
+        discovery_run_id: UUID | str,
+        table_name: str,
+        column_name: str,
+        remediation_action: str,
+        remediated_by: str | None = None,
+        remediation_notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a column finding across all frameworks in a run and recalculate metrics."""
+        from types import SimpleNamespace
+        from src.services.compliance_service import calculate_metrics
+
+        run_id_str = str(discovery_run_id)
+        clean_table = table_name.strip()
+        clean_col = column_name.strip()
+        clean_action = remediation_action.strip()
+
+        find_targets_stmt = text("""
+            SELECT
+                f.finding_id,
+                f.assessment_id,
+                a.framework_code,
+                f.status AS original_status
+            FROM demooc28.compliance_findings f
+            JOIN demooc28.compliance_assessments a
+              ON a.assessment_id = f.assessment_id
+            WHERE a.discovery_run_id = CAST(:run_id AS UUID)
+              AND LOWER(f.table_name) = LOWER(:table_name)
+              AND LOWER(f.column_name) = LOWER(:column_name)
+            ORDER BY a.framework_code;
+        """)
+
+        update_finding_stmt = text("""
+            UPDATE demooc28.compliance_findings
+            SET
+                is_remediated = TRUE,
+                remediation_action = :remediation_action,
+                remediated_by = :remediated_by,
+                remediated_at = NOW(),
+                remediation_notes = :remediation_notes
+            WHERE finding_id = :finding_id
+            RETURNING remediated_at;
+        """)
+
+        all_findings_stmt = text("""
+            SELECT
+                finding_id,
+                status,
+                is_remediated
+            FROM demooc28.compliance_findings
+            WHERE assessment_id = :assessment_id;
+        """)
+
+        update_assessment_stmt = text("""
+            UPDATE demooc28.compliance_assessments
+            SET
+                compliance_score = :score,
+                risk_band = :risk_band,
+                assessment_status = :assessment_status,
+                good_count = :good_count,
+                in_scope_count = :in_scope_count,
+                critical_count = :critical_count,
+                serious_count = :serious_count,
+                needs_review_count = :needs_review_count
+            WHERE assessment_id = :assessment_id;
+        """)
+
+        with self.database.begin() as connection:
+            targets = connection.execute(
+                find_targets_stmt,
+                {
+                    "run_id": run_id_str,
+                    "table_name": clean_table,
+                    "column_name": clean_col,
+                },
+            ).mappings().all()
+
+            if not targets:
+                return {
+                    "discovery_run_id": run_id_str,
+                    "table_name": clean_table,
+                    "column_name": clean_col,
+                    "remediated_findings_count": 0,
+                    "frameworks_updated": [],
+                }
+
+            frameworks_updated: list[dict[str, Any]] = []
+
+            for target in targets:
+                finding_id = target["finding_id"]
+                assessment_id = target["assessment_id"]
+                fw_code = target["framework_code"]
+
+                remediated_at_val = connection.execute(
+                    update_finding_stmt,
+                    {
+                        "finding_id": finding_id,
+                        "remediation_action": clean_action,
+                        "remediated_by": remediated_by,
+                        "remediation_notes": remediation_notes,
+                    },
+                ).scalar_one()
+
+                # Recalculate framework metrics treating remediated findings as Good
+                sibling_rows = connection.execute(
+                    all_findings_stmt,
+                    {"assessment_id": assessment_id},
+                ).mappings().all()
+
+                effective_evals = [
+                    SimpleNamespace(
+                        status="Good" if row["is_remediated"] else row["status"]
+                    )
+                    for row in sibling_rows
+                ]
+                metrics = calculate_metrics(effective_evals)
+
+                connection.execute(
+                    update_assessment_stmt,
+                    {
+                        "assessment_id": assessment_id,
+                        "score": int(round(metrics.score)) if metrics.score is not None else None,
+                        "risk_band": str(getattr(metrics.risk_band, "value", metrics.risk_band)),
+                        "assessment_status": str(
+                            getattr(metrics.assessment_status, "value", metrics.assessment_status)
+                        ),
+                        "good_count": metrics.good_count,
+                        "in_scope_count": metrics.total_in_scope,
+                        "critical_count": metrics.critical_count,
+                        "serious_count": metrics.serious_count,
+                        "needs_review_count": metrics.needs_review_count,
+                    },
+                )
+
+                frameworks_updated.append({
+                    "framework_code": fw_code,
+                    "finding_id": finding_id,
+                    "original_status": target["original_status"],
+                    "is_remediated": True,
+                    "remediation_action": clean_action,
+                    "remediated_by": remediated_by,
+                    "remediated_at": remediated_at_val.isoformat() if remediated_at_val else None,
+                    "updated_metrics": metrics.model_dump(),
+                })
+
+            return {
+                "discovery_run_id": run_id_str,
+                "table_name": clean_table,
+                "column_name": clean_col,
+                "remediated_findings_count": len(frameworks_updated),
+                "frameworks_updated": frameworks_updated,
+            }

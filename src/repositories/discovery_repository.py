@@ -877,6 +877,7 @@ class DiscoveryRepository:
                 discovery_run_id,
                 column_id,
                 display_classification,
+                sensitive_data_type,
                 is_sensitive,
                 confidence,
                 needs_human_review,
@@ -889,6 +890,7 @@ class DiscoveryRepository:
                 :run_id,
                 :column_id,
                 :display_classification,
+                :sensitive_data_type,
                 :is_sensitive,
                 :confidence,
                 :needs_human_review,
@@ -900,6 +902,7 @@ class DiscoveryRepository:
             ON CONFLICT (discovery_run_id, column_id)
             DO UPDATE SET
                 display_classification = EXCLUDED.display_classification,
+                sensitive_data_type = EXCLUDED.sensitive_data_type,
                 is_sensitive = EXCLUDED.is_sensitive,
                 confidence = EXCLUDED.confidence,
                 needs_human_review = EXCLUDED.needs_human_review,
@@ -914,6 +917,15 @@ class DiscoveryRepository:
         if hasattr(display_classification, "value"):
             display_classification = display_classification.value
 
+        raw_subtype = payload.get("sensitive_data_type")
+        if hasattr(raw_subtype, "value"):
+            raw_subtype = raw_subtype.value
+        sensitive_data_type = (
+            str(raw_subtype).strip().upper()
+            if raw_subtype is not None and str(raw_subtype).strip()
+            else None
+        )
+
         is_sensitive = payload.get("is_sensitive", display_classification != "PUBLIC")
 
         with self.database.connect() as connection:
@@ -923,6 +935,7 @@ class DiscoveryRepository:
                     "run_id": str(run_id),
                     "column_id": column_id,
                     "display_classification": display_classification,
+                    "sensitive_data_type": sensitive_data_type,
                     "is_sensitive": is_sensitive,
                     "confidence": payload["confidence"],
                     "needs_human_review": payload.get("needs_human_review", False),
@@ -2301,6 +2314,7 @@ class DiscoveryRepository:
                 col.column_name,
                 col.data_type,
                 cls.display_classification,
+                cls.sensitive_data_type,
                 cls.confidence,
                 cls.needs_human_review,
                 cp.masked_samples
@@ -2336,6 +2350,7 @@ class DiscoveryRepository:
                 "column_name": row["column_name"],
                 "data_type": row["data_type"],
                 "display_classification": row["display_classification"],
+                "sensitive_data_type": row["sensitive_data_type"],
                 "confidence": confidence_pct,
                 "needs_human_review": row["needs_human_review"],
                 "sample": sample_preview,
