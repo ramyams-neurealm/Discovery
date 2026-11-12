@@ -65,10 +65,19 @@ class FrameworkAssessmentResult(BaseModel):
     findings: list[ColumnComplianceFinding]
 
 
+class RemediationLifecycleStatus(str, Enum):
+    OPEN = "OPEN"
+    IN_PROGRESS = "IN_PROGRESS"
+    REMEDIATED_PENDING_VERIFICATION = "REMEDIATED_PENDING_VERIFICATION"
+    VERIFIED = "VERIFIED"
+    ACCEPTED_RISK = "ACCEPTED_RISK"
+
+
 class RemediateFindingRequest(BaseModel):
     table_name: str = Field(min_length=1)
     column_name: str = Field(min_length=1)
     remediation_action: str = Field(min_length=1, max_length=64)
+    remediation_status: RemediationLifecycleStatus = RemediationLifecycleStatus.REMEDIATED_PENDING_VERIFICATION
     remediated_by: str | None = Field(default=None, max_length=128)
     remediation_notes: str | None = None
 
@@ -77,7 +86,8 @@ class RemediatedFrameworkSummary(BaseModel):
     framework_code: str
     finding_id: int
     original_status: str
-    is_remediated: bool = True
+    remediation_status: RemediationLifecycleStatus
+    is_remediated: bool
     remediation_action: str
     remediated_by: str | None = None
     remediated_at: str | None = None

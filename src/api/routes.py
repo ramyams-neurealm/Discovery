@@ -698,6 +698,7 @@ def remediate_compliance_finding(
         table_name=request.table_name,
         column_name=request.column_name,
         remediation_action=request.remediation_action,
+        remediation_status=request.remediation_status.value,
         remediated_by=request.remediated_by,
         remediation_notes=request.remediation_notes,
     )

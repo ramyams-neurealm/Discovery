@@ -586,6 +586,7 @@ class ComplianceRepository:
                 recommendation_text,
                 needs_human_review,
                 is_remediated,
+                remediation_status,
                 remediation_action,
                 remediated_by,
                 remediated_at,
@@ -631,10 +632,17 @@ class ComplianceRepository:
         table_name: str,
         column_name: str,
         remediation_action: str,
+        remediation_status: str = "REMEDIATED_PENDING_VERIFICATION",
         remediated_by: str | None = None,
         remediation_notes: str | None = None,
     ) -> dict[str, Any]:
-        """Resolve a column finding across all frameworks in a run and recalculate metrics."""
+        """Update finding remediation lifecycle across frameworks and recalculate metrics safely.
+
+        Governance rule:
+        - Only VERIFIED findings count as Good in framework score recalculations.
+        - REMEDIATED_PENDING_VERIFICATION, IN_PROGRESS, and ACCEPTED_RISK preserve original risk weight
+          while recording full remediation/governance audit metadata.
+        """
         from types import SimpleNamespace
         from src.services.compliance_service import calculate_metrics
 
@@ -642,6 +650,8 @@ class ComplianceRepository:
         clean_table = table_name.strip()
         clean_col = column_name.strip()
         clean_action = remediation_action.strip()
+        clean_lifecycle = str(getattr(remediation_status, "value", remediation_status)).strip().upper()
+        is_verified = clean_lifecycle == "VERIFIED"
 
         find_targets_stmt = text("""
             SELECT
@@ -661,7 +671,8 @@ class ComplianceRepository:
         update_finding_stmt = text("""
             UPDATE demooc28.compliance_findings
             SET
-                is_remediated = TRUE,
+                remediation_status = :remediation_status,
+                is_remediated = :is_remediated,
                 remediation_action = :remediation_action,
                 remediated_by = :remediated_by,
                 remediated_at = NOW(),
@@ -674,7 +685,8 @@ class ComplianceRepository:
             SELECT
                 finding_id,
                 status,
-                is_remediated
+                is_remediated,
+                remediation_status
             FROM demooc28.compliance_findings
             WHERE assessment_id = :assessment_id;
         """)
@@ -723,13 +735,15 @@ class ComplianceRepository:
                     update_finding_stmt,
                     {
                         "finding_id": finding_id,
+                        "remediation_status": clean_lifecycle,
+                        "is_remediated": is_verified,
                         "remediation_action": clean_action,
                         "remediated_by": remediated_by,
                         "remediation_notes": remediation_notes,
                     },
                 ).scalar_one()
 
-                # Recalculate framework metrics treating remediated findings as Good
+                # Only VERIFIED findings improve the score; pending/accepted preserve original risk weight
                 sibling_rows = connection.execute(
                     all_findings_stmt,
                     {"assessment_id": assessment_id},
@@ -737,7 +751,14 @@ class ComplianceRepository:
 
                 effective_evals = [
                     SimpleNamespace(
-                        status="Good" if row["is_remediated"] else row["status"]
+                        status=(
+                            "Good"
+                            if (
+                                row.get("remediation_status") == "VERIFIED"
+                                or (row.get("remediation_status") is None and row["is_remediated"])
+                            )
+                            else row["status"]
+                        )
                     )
                     for row in sibling_rows
                 ]
@@ -764,7 +785,8 @@ class ComplianceRepository:
                     "framework_code": fw_code,
                     "finding_id": finding_id,
                     "original_status": target["original_status"],
-                    "is_remediated": True,
+                    "remediation_status": clean_lifecycle,
+                    "is_remediated": is_verified,
                     "remediation_action": clean_action,
                     "remediated_by": remediated_by,
                     "remediated_at": remediated_at_val.isoformat() if remediated_at_val else None,
