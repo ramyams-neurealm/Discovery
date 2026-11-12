@@ -404,6 +404,8 @@ class ComplianceRepository:
                     framework_code,
                     compliance_score,
                     risk_band,
+                    assessment_status,
+                    good_count,
                     in_scope_count,
                     critical_count,
                     serious_count,
@@ -413,6 +415,8 @@ class ComplianceRepository:
                     :framework_code,
                     :score,
                     :risk_band,
+                    :assessment_status,
+                    :good_count,
                     :in_scope_count,
                     :critical_count,
                     :serious_count,
@@ -422,6 +426,8 @@ class ComplianceRepository:
                 DO UPDATE SET
                     compliance_score = EXCLUDED.compliance_score,
                     risk_band = EXCLUDED.risk_band,
+                    assessment_status = EXCLUDED.assessment_status,
+                    good_count = EXCLUDED.good_count,
                     in_scope_count = EXCLUDED.in_scope_count,
                     critical_count = EXCLUDED.critical_count,
                     serious_count = EXCLUDED.serious_count,
@@ -432,15 +438,33 @@ class ComplianceRepository:
             result = connection.execute(
                 assessment_stmt,
                 {
-                    "run_id": run_id_str,
-                    "framework_code": fw_code,
-                    "score": int(round(metrics.score)),
-                    "risk_band": str(getattr(metrics.risk_band, "value", metrics.risk_band)),
-                    "in_scope_count": metrics.total_in_scope,
-                    "critical_count": metrics.critical_count,
-                    "serious_count": metrics.serious_count,
-                    "needs_review_count": metrics.needs_review_count,
-                },
+    "run_id": run_id_str,
+    "framework_code": fw_code,
+    "score": (
+        int(round(metrics.score))
+        if metrics.score is not None
+        else None
+    ),
+    "risk_band": str(
+        getattr(
+            metrics.risk_band,
+            "value",
+            metrics.risk_band,
+        )
+    ),
+    "assessment_status": str(
+        getattr(
+            metrics.assessment_status,
+            "value",
+            metrics.assessment_status,
+        )
+    ),
+    "good_count": metrics.good_count,
+    "in_scope_count": metrics.total_in_scope,
+    "critical_count": metrics.critical_count,
+    "serious_count": metrics.serious_count,
+    "needs_review_count": metrics.needs_review_count,
+},
             )
             assessment_id = result.scalar_one()
 
@@ -539,6 +563,8 @@ class ComplianceRepository:
                 framework_code,
                 compliance_score,
                 risk_band,
+                assessment_status,
+                good_count,
                 in_scope_count,
                 critical_count,
                 serious_count,

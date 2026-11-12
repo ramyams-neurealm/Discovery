@@ -7,6 +7,12 @@ class ComplianceStatus(str, Enum):
     CRITICAL = "Critical"
     SERIOUS = "Serious"
     NEEDS_REVIEW = "Needs review"
+    GOOD = "Good"
+
+class AssessmentStatus(str, Enum):
+    ASSESSED = "ASSESSED"
+    NO_COLUMNS_IN_SCOPE = "NO_COLUMNS_IN_SCOPE"
+    EVALUATION_FAILED = "EVALUATION_FAILED"
 
 
 class RiskBand(str, Enum):
@@ -14,6 +20,7 @@ class RiskBand(str, Enum):
     MODERATE_RISK = "MODERATE_RISK"
     SERIOUS_RISK = "SERIOUS_RISK"
     CRITICAL_RISK = "CRITICAL_RISK"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class ColumnComplianceFinding(BaseModel):
@@ -40,8 +47,11 @@ class FrameworkBatchOutput(BaseModel):
 
 
 class FrameworkMetrics(BaseModel):
-    score: int
+    score: int | None
     risk_band: RiskBand
+    assessment_status: AssessmentStatus = (
+        AssessmentStatus.ASSESSED
+    )
     total_in_scope: int
     critical_count: int
     serious_count: int

@@ -2,6 +2,7 @@ import asyncio
 from typing import Any
 from src.agents.compliance_agent import ComplianceAgent
 from src.models.compliance_schemas import (
+    AssessmentStatus,
     FrameworkAssessmentResult,
     FrameworkMetrics,
     RiskBand,
@@ -14,8 +15,11 @@ def calculate_metrics(evaluations: list[Any]) -> FrameworkMetrics:
     n = len(evaluations)
     if n == 0:
         return FrameworkMetrics(
-            score=100,
-            risk_band=RiskBand.GOOD,
+            score=None,
+            risk_band=RiskBand.NOT_APPLICABLE,
+            assessment_status=(
+                AssessmentStatus.NO_COLUMNS_IN_SCOPE
+            ),
             total_in_scope=0,
             critical_count=0,
             serious_count=0,
