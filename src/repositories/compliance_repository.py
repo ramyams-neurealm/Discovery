@@ -705,7 +705,7 @@ class ComplianceRepository:
             WHERE assessment_id = :assessment_id;
         """)
 
-        with self.database.begin() as connection:
+        with self.database.engine.begin() as connection:
             targets = connection.execute(
                 find_targets_stmt,
                 {

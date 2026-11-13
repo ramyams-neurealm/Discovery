@@ -27,6 +27,7 @@ from src.models.schemas import (
     ConnectionUpdate,
     DiscoveryRunRequest,
 )
+from src.models.compliance_schemas import RemediateFindingRequest
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.services.database import MetadataDatabase
 from src.tools.connection_tools import (
@@ -683,13 +684,12 @@ def get_compliance_results(
 @router.patch("/discovery-runs/{run_id}/compliance-findings/remediate")
 def remediate_compliance_finding(
     run_id: UUID,
-    payload: Any = Body(...),
+    payload: RemediateFindingRequest,
     database: MetadataDatabase = Depends(get_database),
 ) -> dict[str, Any]:
-    from src.models.compliance_schemas import RemediateFindingRequest
     from src.repositories.compliance_repository import ComplianceRepository
 
-    request = RemediateFindingRequest.model_validate(payload)
+    request = payload
     repository = _get_repository(database)
     _require_discovery_run(repository, run_id)
 
