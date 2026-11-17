@@ -8,6 +8,7 @@ from src.connectors.object_metadata import (
     normalize_object_metadata,
 )
 
+
 class PostgreSQLConnector(DatabaseConnector):
     @property
     def health_query(self) -> str:
@@ -127,8 +128,14 @@ class PostgreSQLConnector(DatabaseConnector):
     ) -> None:
         if not selected_objects:
             return
-        requested = {(str(i.get("object_type") or "").upper(), str(i.get("object_name") or "")) for i in selected_objects}
-        discovered = {(str(i.get("object_type") or "").upper(), str(i.get("object_name") or "")) for i in discovered_objects}
+        requested = {
+            (str(i.get("object_type") or "").upper(), str(i.get("object_name") or ""))
+            for i in selected_objects
+        }
+        discovered = {
+            (str(i.get("object_type") or "").upper(), str(i.get("object_name") or ""))
+            for i in discovered_objects
+        }
         missing = sorted(requested - discovered)
         if missing:
             formatted = ", ".join(f"{t}:{n}" for t, n in missing)
@@ -216,6 +223,8 @@ class PostgreSQLConnector(DatabaseConnector):
             "v": "VIEW",
             "m": "MATERIALIZED VIEW",
         }
+
+        posture = self._posture_metadata(schema_filter=schema_filter)
 
         for row in rows:
             schema_name = str(row[0])
@@ -322,10 +331,21 @@ class PostgreSQLConnector(DatabaseConnector):
                 )
             )
 
+            tbl_key = (schema_name.lower(), object_name.lower())
+            item["posture_signals"] = {
+                "is_read_replica": posture["is_read_replica"],
+                "rls_enabled": posture["rls_map"].get(tbl_key, False),
+                "select_grantees": sorted(set(posture["grants_map"].get(tbl_key, []))),
+                "masked_columns": [
+                    col_name
+                    for (sch, tbl, col_name) in posture["masked_cols"]
+                    if sch == schema_name.lower() and tbl == object_name.lower()
+                ],
+            }
+
             objects.append(item)
 
         return objects
-    
 
     def _relation_definition(
         self,
@@ -399,7 +419,7 @@ class PostgreSQLConnector(DatabaseConnector):
             )
 
         return prefix + definition
-    
+
     def _discover_routines(
         self,
         schema_filter: str | None = None,
@@ -602,7 +622,6 @@ class PostgreSQLConnector(DatabaseConnector):
         schema_filter: str | None = None,
         selection: dict[str, set[str]] | None = None,
     ) -> list[dict[str, Any]]:
-        
         """Discover user-defined PostgreSQL triggers."""
 
         query = """
@@ -697,7 +716,6 @@ class PostgreSQLConnector(DatabaseConnector):
                 function_name,
                 function_language,
             ) = row
-            
 
             if not self._is_selected(
                 selection or {}, "TRIGGER", str(trigger_name)
@@ -791,6 +809,69 @@ class PostgreSQLConnector(DatabaseConnector):
             "timing": timing,
             "events": events,
             "orientation": orientation,
+        }
+
+    def _posture_metadata(self, schema_filter: str | None = None) -> dict[str, Any]:
+        """Collect read-replica status, table RLS flags, SELECT grants, and pg_seclabel masking."""
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT pg_is_in_recovery()")
+            rec_row = cursor.fetchone()
+            is_read_replica = bool(rec_row[0]) if rec_row else False
+
+            # 1. Row-Level Security (RLS) per table
+            rls_query = """
+                SELECT n.nspname, c.relname, c.relrowsecurity
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('r', 'p')
+                  AND n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+            """
+            rls_params: list[Any] = []
+            if schema_filter:
+                rls_query += " AND n.nspname = %s"
+                rls_params.append(schema_filter)
+            cursor.execute(rls_query, rls_params)
+            rls_map = {(str(r[0]).lower(), str(r[1]).lower()): bool(r[2]) for r in cursor.fetchall()}
+
+            # 2. Table-level SELECT grants (includes 'PUBLIC')
+            grants_query = """
+                SELECT table_schema, table_name, grantee
+                FROM information_schema.table_privileges
+                WHERE privilege_type = 'SELECT'
+                  AND table_schema NOT IN ('information_schema', 'pg_catalog')
+            """
+            grant_params: list[Any] = []
+            if schema_filter:
+                grants_query += " AND table_schema = %s"
+                grant_params.append(schema_filter)
+            cursor.execute(grants_query, grant_params)
+            grants_map: dict[tuple[str, str], list[str]] = {}
+            for sch, tbl, grantee in cursor.fetchall():
+                grants_map.setdefault((str(sch).lower(), str(tbl).lower()), []).append(str(grantee))
+
+            # 3. Column-level dynamic masking labels (pg_seclabel / pg_anonymizer)
+            mask_query = """
+                SELECT n.nspname, c.relname, a.attname
+                FROM pg_seclabel s
+                JOIN pg_class c ON c.oid = s.objoid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = s.objsubid
+            """
+            mask_params: list[Any] = []
+            if schema_filter:
+                mask_query += " WHERE n.nspname = %s"
+                mask_params.append(schema_filter)
+            cursor.execute(mask_query, mask_params)
+            masked_cols = {
+                (str(r[0]).lower(), str(r[1]).lower(), str(r[2]).lower())
+                for r in cursor.fetchall()
+            }
+
+        return {
+            "is_read_replica": is_read_replica,
+            "rls_map": rls_map,
+            "grants_map": grants_map,
+            "masked_cols": masked_cols,
         }
 
     def _columns(self, schema_name: str, object_name: str):

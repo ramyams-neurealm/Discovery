@@ -42,6 +42,21 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
                 connection_id=connection_id,
                 objects=discovered_objects,
             )
+
+            posture_by_obj = {
+                (
+                    str(obj.get("schema_name") or "").lower(),
+                    str(obj.get("object_name") or "").lower(),
+                ): obj.get("posture_signals", {})
+                for obj in discovered_objects
+            }
+            for saved_obj in saved_objects:
+                key = (
+                    str(saved_obj.get("schema_name") or "").lower(),
+                    str(saved_obj.get("object_name") or "").lower(),
+                )
+                saved_obj["posture_signals"] = posture_by_obj.get(key, {})
+
             table_profiles, column_profiles = profile_tables(
                 source_connector=source_connector,
                 objects=saved_objects,
@@ -96,7 +111,7 @@ class MetadataDiscoveryProfilingAgent(BaseAgent):
         except Exception as error:
             import logging
             logging.getLogger(__name__).exception("METADATA PROFILING DETAILED TRACEBACK:")
-            
+
             # Change {error.__class__.__name__} to str(error) so the full reason shows in DBeaver
             safe = f"Metadata discovery failed: {error}"
             self.repository.update_stage(
