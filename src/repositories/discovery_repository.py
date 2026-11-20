@@ -2078,11 +2078,35 @@ class DiscoveryRepository:
             WHERE discovery_run_id = CAST(:run_id AS UUID)
             GROUP BY display_classification
         """)
+        compliance_query = text("""
+            SELECT
+                framework_code,
+                compliance_score,
+                risk_band,
+                in_scope_count,
+                good_count,
+                critical_count,
+                serious_count,
+                needs_review_count
+            FROM demooc28.compliance_assessments
+            WHERE discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY CASE framework_code
+                WHEN 'HIPAA' THEN 1
+                WHEN 'GDPR' THEN 2
+                WHEN 'DPDP' THEN 3
+                WHEN 'CCPA_CPRA' THEN 4
+                WHEN 'CCPA' THEN 5
+                ELSE 6
+            END, framework_code
+        """)
         params = {"run_id": str(run_id)}
         with self.database.connect() as connection:
             base = dict(connection.execute(base_query, params).mappings().one())
             classifications = connection.execute(
                 classification_query, params
+            ).mappings().all()
+            compliance_rows = connection.execute(
+                compliance_query, params
             ).mappings().all()
 
         counts = {
@@ -2098,9 +2122,27 @@ class DiscoveryRepository:
             estimated_size_bytes / (1024 * 1024),
             2,
         )
+        regulatory_compliance = [
+            {
+                "framework_code": row["framework_code"],
+                "compliance_score": (
+                    int(row["compliance_score"])
+                    if row["compliance_score"] is not None
+                    else None
+                ),
+                "risk_band": row["risk_band"],
+                "in_scope_count": int(row["in_scope_count"] or 0),
+                "good_count": int(row["good_count"] or 0),
+                "critical_count": int(row["critical_count"] or 0),
+                "serious_count": int(row["serious_count"] or 0),
+                "needs_review_count": int(row["needs_review_count"] or 0),
+            }
+            for row in compliance_rows
+        ]
         return {
             **base,
             "classification_counts": counts,
+            "regulatory_compliance": regulatory_compliance,
         }
 
     # def get_table_profiles_result(
