@@ -16,14 +16,30 @@ class MySQLConnector(DatabaseConnector):
     def connect(self):
         import mysql.connector
 
+        ssl_enabled = bool(self.config.get("ssl_enabled", False))
+        base_kwargs = {
+            "host": self.config["host"],
+            "port": int(self.config.get("port", 3306)),
+            "database": self.config["database_name"],
+            "user": self.config["username"],
+            "password": self.password,
+            "connection_timeout": 10,
+        }
+
+        if ssl_enabled:
+            try:
+                self.connection = mysql.connector.connect(
+                    **base_kwargs,
+                    ssl_disabled=False,
+                    ssl_verify_cert=False,
+                )
+                return self.connection
+            except mysql.connector.Error:
+                pass
+
         self.connection = mysql.connector.connect(
-            host=self.config["host"],
-            port=int(self.config.get("port", 3306)),
-            database=self.config["database_name"],
-            user=self.config["username"],
-            password=self.password,
-            connection_timeout=10,
-            ssl_disabled=not self.config.get("ssl_enabled", False),
+            **base_kwargs,
+            ssl_disabled=True,
         )
         return self.connection
 

@@ -14,10 +14,33 @@ class OracleConnector(DatabaseConnector):
     def connect(self):
         import oracledb
 
+        ssl_enabled = bool(self.config.get("ssl_enabled", False))
+        host = self.config["host"]
+        port = int(self.config.get("port", 1521))
+        service_name = self.config["database_name"]
+
+        if ssl_enabled:
+            try:
+                tcps_dsn = oracledb.makedsn(
+                    host,
+                    port,
+                    service_name=service_name,
+                    protocol="tcps",
+                )
+                self.connection = oracledb.connect(
+                    user=self.config["username"],
+                    password=self.password,
+                    dsn=tcps_dsn,
+                    ssl_server_dn_match=False,
+                )
+                return self.connection
+            except oracledb.Error:
+                pass
+
         dsn = oracledb.makedsn(
-            self.config["host"],
-            int(self.config.get("port", 1521)),
-            service_name=self.config["database_name"],
+            host,
+            port,
+            service_name=service_name,
         )
         self.connection = oracledb.connect(
             user=self.config["username"],
