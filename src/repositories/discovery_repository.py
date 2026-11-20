@@ -2816,6 +2816,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from src.connectors.object_metadata import calculate_complexity
 
 from src.services.database import MetadataDatabase
 from src.tools.hipaa_control_policy import evaluate_hipaa_controls
@@ -4625,6 +4626,236 @@ class DiscoveryRepository:
             **base,
             "classification_counts": counts,
             "regulatory_compliance": regulatory_compliance,
+        }
+
+    def get_discovered_objects_result(
+        self, run_id: UUID | str
+    ) -> dict[str, Any]:
+        """Return all discovered database objects across all object types with complexity and properties."""
+        objects_query = text("""
+            SELECT
+                obj.object_id,
+                obj.schema_name,
+                obj.object_name,
+                obj.object_type,
+                obj.object_metadata,
+                obj.created_at,
+                obj.updated_at,
+                prof.table_profile_id,
+                prof.row_count,
+                prof.column_count AS profiled_column_count
+            FROM demooc28.discovered_objects AS obj
+            LEFT JOIN demooc28.table_profiles AS prof
+              ON prof.object_id = obj.object_id
+             AND prof.discovery_run_id = obj.discovery_run_id
+            WHERE obj.discovery_run_id = CAST(:run_id AS UUID)
+            ORDER BY
+                CASE UPPER(obj.object_type)
+                    WHEN 'TABLE' THEN 1
+                    WHEN 'VIEW' THEN 2
+                    WHEN 'MATERIALIZED_VIEW' THEN 3
+                    WHEN 'PROCEDURE' THEN 4
+                    WHEN 'FUNCTION' THEN 5
+                    WHEN 'TRIGGER' THEN 6
+                    ELSE 7
+                END,
+                obj.schema_name,
+                obj.object_name
+        """)
+
+        dependency_query = text("""
+            SELECT
+                source_object_id,
+                target_object_id,
+                UPPER(relationship_type) AS relationship_type
+            FROM demooc28.dependency_edges
+            WHERE discovery_run_id = CAST(:run_id AS UUID)
+        """)
+
+        params = {"run_id": str(run_id)}
+        with self.database.connect() as connection:
+            object_rows = [
+                dict(row)
+                for row in connection.execute(objects_query, params).mappings().all()
+            ]
+            edge_rows = [
+                dict(row)
+                for row in connection.execute(dependency_query, params).mappings().all()
+            ]
+
+        tables_read_by_source: dict[int, set[int]] = {}
+        tables_written_by_source: dict[int, set[int]] = {}
+        total_edges_by_object: dict[int, int] = {}
+
+        for edge in edge_rows:
+            src_id = int(edge["source_object_id"])
+            tgt_id = int(edge["target_object_id"])
+            rel_type = str(edge.get("relationship_type") or "")
+
+            total_edges_by_object[src_id] = total_edges_by_object.get(src_id, 0) + 1
+            total_edges_by_object[tgt_id] = total_edges_by_object.get(tgt_id, 0) + 1
+
+            if rel_type.endswith("_READS_TABLE"):
+                tables_read_by_source.setdefault(src_id, set()).add(tgt_id)
+            elif rel_type.endswith("_WRITES_TABLE"):
+                tables_written_by_source.setdefault(src_id, set()).add(tgt_id)
+
+        display_type_map = {
+            "TABLE": "Table",
+            "VIEW": "View",
+            "MATERIALIZED_VIEW": "Materialized view",
+            "PROCEDURE": "Stored procedure",
+            "FUNCTION": "Function",
+            "TRIGGER": "Trigger",
+        }
+
+        object_type_counts = {
+            "TABLE": 0,
+            "VIEW": 0,
+            "MATERIALIZED_VIEW": 0,
+            "PROCEDURE": 0,
+            "FUNCTION": 0,
+            "TRIGGER": 0,
+        }
+
+        items: list[dict[str, Any]] = []
+        for row in object_rows:
+            object_id = int(row["object_id"])
+            object_type = str(row["object_type"] or "").strip().upper()
+            object_type_counts[object_type] = (
+                object_type_counts.get(object_type, 0) + 1
+            )
+
+            metadata = row.get("object_metadata") or {}
+            lines_of_code = int(metadata.get("lines_of_code") or 0)
+            parameter_count = int(metadata.get("parameter_count") or 0)
+            column_count = int(
+                row["profiled_column_count"]
+                if row.get("profiled_column_count") is not None
+                else (metadata.get("column_count") or 0)
+            )
+            foreign_key_count = int(metadata.get("foreign_key_count") or 0)
+            dependency_count = int(
+                metadata.get("dependency_count")
+                or total_edges_by_object.get(object_id, 0)
+            )
+
+            complexity = str(metadata.get("complexity") or "").strip().upper()
+            if complexity not in {"LOW", "MEDIUM", "HIGH"}:
+                complexity = calculate_complexity(
+                    object_type=object_type,
+                    lines_of_code=lines_of_code,
+                    parameter_count=parameter_count,
+                    column_count=column_count,
+                    foreign_key_count=foreign_key_count,
+                    dependency_count=dependency_count,
+                )
+
+            tables_read = len(tables_read_by_source.get(object_id, set()))
+            tables_written = len(tables_written_by_source.get(object_id, set()))
+            language = metadata.get("language")
+            last_altered_at = metadata.get("last_altered_at")
+
+            if object_type == "TABLE":
+                row_count = (
+                    int(row["row_count"])
+                    if row.get("row_count") is not None
+                    else None
+                )
+                row_label = (
+                    f"{row_count:,} row{'s' if row_count != 1 else ''}"
+                    if row_count is not None
+                    else "0 rows"
+                )
+                col_label = (
+                    f"{column_count:,} column{'s' if column_count != 1 else ''}"
+                )
+                properties: dict[str, Any] = {
+                    "row_count": row_count,
+                    "column_count": column_count,
+                    "summary": f"{row_label} · {col_label}",
+                }
+                status_label = (
+                    "Profiled this run"
+                    if row.get("table_profile_id") is not None
+                    else "Discovered"
+                )
+            elif object_type == "TRIGGER":
+                trigger_table = metadata.get("trigger_table")
+                trigger_timing = metadata.get("trigger_timing")
+                trigger_events = metadata.get("trigger_events") or []
+                if isinstance(trigger_events, str):
+                    trigger_events = [trigger_events]
+
+                event_part = " ".join(
+                    part
+                    for part in [
+                        str(trigger_timing).strip() if trigger_timing else "",
+                        "/".join(str(e).strip() for e in trigger_events if e),
+                    ]
+                    if part
+                )
+                summary_parts = []
+                if trigger_table:
+                    summary_parts.append(f"on {trigger_table}")
+                if event_part:
+                    summary_parts.append(event_part)
+
+                properties = {
+                    "trigger_table": trigger_table,
+                    "trigger_timing": trigger_timing,
+                    "trigger_events": trigger_events,
+                    "summary": " · ".join(summary_parts) or "Trigger",
+                }
+                status_label = (
+                    str(last_altered_at)[:10]
+                    if last_altered_at
+                    else "Discovered"
+                )
+            else:
+                summary_parts = [
+                    f"{tables_read} table{'s' if tables_read != 1 else ''} read"
+                ]
+                if tables_written > 0:
+                    summary_parts.append(f"{tables_written} written")
+                if language:
+                    summary_parts.append(str(language))
+
+                properties = {
+                    "tables_read": tables_read,
+                    "tables_written": tables_written,
+                    "language": language,
+                    "parameter_count": parameter_count,
+                    "return_type": metadata.get("return_type"),
+                    "lines_of_code": lines_of_code,
+                    "summary": " · ".join(summary_parts),
+                }
+                status_label = (
+                    str(last_altered_at)[:10]
+                    if last_altered_at
+                    else "Discovered"
+                )
+
+            items.append({
+                "object_id": object_id,
+                "schema_name": row["schema_name"],
+                "object_name": row["object_name"],
+                "object_type": object_type,
+                "display_type": display_type_map.get(
+                    object_type, object_type.replace("_", " ").title()
+                ),
+                "complexity": complexity,
+                "properties": properties,
+                "status_label": status_label,
+                "last_altered_at": last_altered_at,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+
+        return {
+            "total_objects": len(items),
+            "object_type_counts": object_type_counts,
+            "objects": items,
         }
 
     def get_table_profiles_result(

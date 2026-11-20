@@ -590,6 +590,14 @@ def get_discovery_overview(
     _require_discovery_run(repository, run_id)
     return repository.get_overview(run_id)
 
+@router.get("/discovery-runs/{run_id}/objects")
+def get_discovered_objects(
+    run_id: UUID,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    repository = _get_repository(database)
+    _require_discovery_run(repository, run_id)
+    return repository.get_discovered_objects_result(run_id)
 
 @router.get("/discovery-runs/{run_id}/table-profiles")
 def get_table_profiles(
