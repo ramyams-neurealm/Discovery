@@ -27,7 +27,10 @@ from src.models.schemas import (
     ConnectionUpdate,
     DiscoveryRunRequest,
 )
-from src.models.compliance_schemas import RemediateFindingRequest
+from src.models.compliance_schemas import (
+    RemediateFindingRequest,
+    UpdateRemediationStandardsRequest,
+)
 from src.repositories.discovery_repository import DiscoveryRepository
 from src.services.database import MetadataDatabase
 from src.tools.connection_tools import (
@@ -689,40 +692,118 @@ def get_compliance_results(
     }
 
 
-@router.patch("/discovery-runs/{run_id}/compliance-findings/remediate")
-def remediate_compliance_finding(
+def _execute_remediation_update(
     run_id: UUID,
     payload: RemediateFindingRequest,
-    database: MetadataDatabase = Depends(get_database),
+    database: MetadataDatabase,
 ) -> dict[str, Any]:
     from src.repositories.compliance_repository import ComplianceRepository
 
-    request = payload
     repository = _get_repository(database)
     _require_discovery_run(repository, run_id)
 
     comp_repo = ComplianceRepository(database)
-    result = comp_repo.remediate_finding_across_frameworks(
-        discovery_run_id=run_id,
-        table_name=request.table_name,
-        column_name=request.column_name,
-        remediation_action=request.remediation_action,
-        remediation_status=request.remediation_status.value,
-        remediated_by=request.remediated_by,
-        remediation_notes=request.remediation_notes,
-    )
+    try:
+        result = comp_repo.remediate_finding_across_frameworks(
+            discovery_run_id=run_id,
+            table_name=payload.table_name,
+            column_name=payload.column_name,
+            remediation_action=payload.remediation_action,
+            remediation_status=(
+                payload.remediation_status.value
+                if payload.remediation_status
+                else None
+            ),
+            remediated_by=payload.remediated_by,
+            remediation_notes=payload.remediation_notes,
+            action_type=(
+                payload.action_type.value if payload.action_type else None
+            ),
+            assigned_to=payload.assigned_to,
+            due_date=payload.due_date,
+            justification=payload.justification,
+            approved_by=payload.approved_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if result["remediated_findings_count"] == 0:
         raise HTTPException(
             status_code=404,
             detail=(
-                f"No compliance findings found for {request.table_name}.{request.column_name} "
+                f"No compliance findings found for {payload.table_name}.{payload.column_name} "
                 f"in discovery run {run_id}"
             ),
         )
 
     return result
 
+
+@router.get("/discovery-runs/{run_id}/remediation")
+def get_remediation_workspace(
+    run_id: UUID,
+    status: str | None = None,
+    search: str | None = None,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    from src.repositories.compliance_repository import ComplianceRepository
+
+    repository = _get_repository(database)
+    _require_discovery_run(repository, run_id)
+
+    comp_repo = ComplianceRepository(database)
+    return comp_repo.get_remediation_workspace(
+        discovery_run_id=run_id,
+        status_filter=status,
+        search=search,
+    )
+
+
+@router.patch("/discovery-runs/{run_id}/remediation")
+def update_remediation_finding(
+    run_id: UUID,
+    payload: RemediateFindingRequest,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    return _execute_remediation_update(run_id, payload, database)
+
+
+@router.patch("/discovery-runs/{run_id}/compliance-findings/remediate")
+def remediate_compliance_finding(
+    run_id: UUID,
+    payload: RemediateFindingRequest,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    return _execute_remediation_update(run_id, payload, database)
+
+
+@router.get("/remediation-standards")
+def get_remediation_standards(
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    from src.repositories.compliance_repository import ComplianceRepository
+
+    comp_repo = ComplianceRepository(database)
+    return comp_repo.get_remediation_standards()
+
+
+@router.put("/remediation-standards")
+def update_remediation_standards(
+    payload: UpdateRemediationStandardsRequest,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    from src.repositories.compliance_repository import ComplianceRepository
+
+    comp_repo = ComplianceRepository(database)
+    return comp_repo.update_remediation_standards(
+        critical_sla_days=payload.critical_sla_days,
+        serious_sla_days=payload.serious_sla_days,
+        needs_review_sla_days=payload.needs_review_sla_days,
+        min_justification_chars=payload.min_justification_chars,
+        require_lead_signoff=payload.require_lead_signoff,
+        preferred_fixes=payload.preferred_fixes,
+        updated_by=payload.updated_by,
+    )
 # @router.get("/discovery-runs/{run_id}/compliance-results")
 # def get_compliance_results(
 #     run_id: UUID,

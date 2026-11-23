@@ -73,13 +73,35 @@ class RemediationLifecycleStatus(str, Enum):
     ACCEPTED_RISK = "ACCEPTED_RISK"
 
 
+class RemediationActionType(str, Enum):
+    APPLY_RECOMMENDED_FIX = "APPLY_RECOMMENDED_FIX"
+    START_REMEDIATION = "START_REMEDIATION"
+    MARK_RESOLVED = "MARK_RESOLVED"
+    ACCEPT_RISK = "ACCEPT_RISK"
+
+
 class RemediateFindingRequest(BaseModel):
     table_name: str = Field(min_length=1)
     column_name: str = Field(min_length=1)
-    remediation_action: str = Field(min_length=1, max_length=64)
-    remediation_status: RemediationLifecycleStatus = RemediationLifecycleStatus.REMEDIATED_PENDING_VERIFICATION
+    action_type: RemediationActionType | None = None
+    remediation_action: str | None = Field(default=None, max_length=255)
+    remediation_status: RemediationLifecycleStatus | None = None
     remediated_by: str | None = Field(default=None, max_length=128)
     remediation_notes: str | None = None
+    assigned_to: str | None = Field(default=None, max_length=128)
+    due_date: str | None = Field(
+        default=None,
+        description="ISO date string (YYYY-MM-DD) for Start Remediation",
+    )
+    justification: str | None = Field(
+        default=None,
+        description="Required justification text when action_type is ACCEPT_RISK",
+    )
+    approved_by: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Compliance Lead sign-off name when accepting critical/serious risk",
+    )
 
 
 class RemediatedFrameworkSummary(BaseModel):
@@ -91,6 +113,9 @@ class RemediatedFrameworkSummary(BaseModel):
     remediation_action: str
     remediated_by: str | None = None
     remediated_at: str | None = None
+    assigned_to: str | None = None
+    due_date: str | None = None
+    approved_by: str | None = None
     updated_metrics: FrameworkMetrics
 
 
@@ -100,3 +125,24 @@ class RemediateFindingResponse(BaseModel):
     column_name: str
     remediated_findings_count: int
     frameworks_updated: list[RemediatedFrameworkSummary]
+
+
+class RemediationStandardsSchema(BaseModel):
+    critical_sla_days: int = Field(default=3, ge=1)
+    serious_sla_days: int = Field(default=14, ge=1)
+    needs_review_sla_days: int = Field(default=30, ge=1)
+    min_justification_chars: int = Field(default=40, ge=0)
+    require_lead_signoff: bool = True
+    preferred_fixes: dict[str, str] = Field(default_factory=dict)
+    updated_by: str | None = None
+    updated_at: str | None = None
+
+
+class UpdateRemediationStandardsRequest(BaseModel):
+    critical_sla_days: int | None = Field(default=None, ge=1)
+    serious_sla_days: int | None = Field(default=None, ge=1)
+    needs_review_sla_days: int | None = Field(default=None, ge=1)
+    min_justification_chars: int | None = Field(default=None, ge=0)
+    require_lead_signoff: bool | None = None
+    preferred_fixes: dict[str, str] | None = None
+    updated_by: str | None = Field(default=None, max_length=128)
