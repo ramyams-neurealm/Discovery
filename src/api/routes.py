@@ -280,7 +280,36 @@ def get_database_connection(
     record.pop("password_encrypted", None)
     return record
 
+@router.get("/connections/{connection_id}/runs")
+def list_connection_runs(
+    connection_id: int,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Return chronological discovery run history for a datasource connection."""
+    repository = _get_repository(database)
+    datasource = repository.get_datasource_connection(connection_id)
+    if datasource is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "CONNECTION_NOT_FOUND",
+                "message": "Datasource connection not found.",
+            },
+        )
 
+    runs = repository.list_connection_runs(connection_id)
+    return {
+        "connection_id": connection_id,
+        "connection_name": datasource.get("connection_name"),
+        "database_type": datasource.get("database_type"),
+        "host": datasource.get("host"),
+        "port": datasource.get("port"),
+        "database_name": datasource.get("database_name"),
+        "schema_name": datasource.get("schema_name"),
+        "total_runs": len(runs),
+        "latest_run_id": runs[0]["discovery_run_id"] if runs else None,
+        "runs": runs,
+    }
 
 
 @router.get("/connections/{connection_id}/objects")

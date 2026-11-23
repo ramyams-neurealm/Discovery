@@ -8275,3 +8275,189 @@ class DiscoveryRepository:
             ).mappings().all()
 
         return [dict(row) for row in rows]
+
+    def list_connection_runs(
+        self,
+        connection_id: int,
+    ) -> list[dict[str, Any]]:
+        """Return chronological discovery run history with summary metrics for a connection."""
+        runs_query = text("""
+            SELECT
+                discovery_run_id,
+                connection_id,
+                requested_scopes,
+                effective_scopes,
+                status,
+                current_stage,
+                progress_percentage,
+                started_by,
+                started_at,
+                completed_at,
+                created_at
+            FROM demooc28.discovery_runs
+            WHERE connection_id = :connection_id
+            ORDER BY COALESCE(started_at, created_at) ASC, created_at ASC
+        """)
+
+        objects_query = text("""
+            SELECT
+                discovery_run_id,
+                COUNT(*) FILTER (WHERE UPPER(COALESCE(object_type, '')) = 'TABLE') AS tables_count,
+                COUNT(*) FILTER (WHERE UPPER(COALESCE(object_type, '')) <> 'TABLE') AS other_objects_count,
+                COUNT(*) AS total_objects_count
+            FROM demooc28.discovered_objects
+            WHERE discovery_run_id IN (
+                SELECT discovery_run_id
+                FROM demooc28.discovery_runs
+                WHERE connection_id = :connection_id
+            )
+            GROUP BY discovery_run_id
+        """)
+
+        classifications_query = text("""
+            SELECT
+                discovery_run_id,
+                UPPER(COALESCE(display_classification, 'SENSITIVE')) AS classification,
+                COUNT(*) AS col_count
+            FROM demooc28.column_classifications
+            WHERE discovery_run_id IN (
+                SELECT discovery_run_id
+                FROM demooc28.discovery_runs
+                WHERE connection_id = :connection_id
+            )
+              AND is_sensitive = TRUE
+            GROUP BY discovery_run_id, UPPER(COALESCE(display_classification, 'SENSITIVE'))
+            ORDER BY col_count DESC, classification ASC
+        """)
+
+        compliance_query = text("""
+            SELECT
+                discovery_run_id,
+                framework_code,
+                compliance_score,
+                risk_band,
+                assessment_status,
+                in_scope_count,
+                critical_count,
+                serious_count,
+                needs_review_count,
+                good_count
+            FROM demooc28.compliance_assessments
+            WHERE discovery_run_id IN (
+                SELECT discovery_run_id
+                FROM demooc28.discovery_runs
+                WHERE connection_id = :connection_id
+            )
+            ORDER BY framework_code ASC
+        """)
+
+        params = {"connection_id": connection_id}
+        with self.database.connect() as connection:
+            run_rows = connection.execute(runs_query, params).mappings().all()
+            if not run_rows:
+                return []
+
+            object_rows = connection.execute(objects_query, params).mappings().all()
+            class_rows = connection.execute(classifications_query, params).mappings().all()
+            comp_rows = connection.execute(compliance_query, params).mappings().all()
+
+        objects_by_run: dict[str, dict[str, int]] = {}
+        for row in object_rows:
+            rid = str(row["discovery_run_id"])
+            objects_by_run[rid] = {
+                "tables_count": int(row["tables_count"] or 0),
+                "other_objects_count": int(row["other_objects_count"] or 0),
+                "total_objects_count": int(row["total_objects_count"] or 0),
+            }
+
+        class_by_run: dict[str, dict[str, int]] = {}
+        for row in class_rows:
+            rid = str(row["discovery_run_id"])
+            class_by_run.setdefault(rid, {})[row["classification"]] = int(row["col_count"] or 0)
+
+        comp_by_run: dict[str, list[dict[str, Any]]] = {}
+        for row in comp_rows:
+            rid = str(row["discovery_run_id"])
+            comp_by_run.setdefault(rid, []).append(
+                {
+                    "framework_code": row["framework_code"],
+                    "score": row["compliance_score"],
+                    "risk_band": row["risk_band"],
+                    "assessment_status": row["assessment_status"],
+                    "in_scope_count": row["in_scope_count"],
+                    "critical_count": row["critical_count"],
+                    "serious_count": row["serious_count"],
+                    "needs_review_count": row["needs_review_count"],
+                    "good_count": row["good_count"],
+                }
+            )
+
+        total_runs = len(run_rows)
+        history: list[dict[str, Any]] = []
+
+        for idx, run in enumerate(run_rows, start=1):
+            rid = str(run["discovery_run_id"])
+            raw_scopes = run["effective_scopes"] or run["requested_scopes"] or []
+            if isinstance(raw_scopes, str):
+                raw_scopes = json.loads(raw_scopes)
+            scopes_set = {str(s).upper() for s in raw_scopes}
+
+            has_classification = "COLUMN_CLASSIFICATION" in scopes_set
+            has_lineage = bool(scopes_set & {"DEPENDENCY_MAP", "DEPENDENCY_MAPPING"})
+            has_compliance = bool(scopes_set & {"REGULATORY_COMPLIANCE", "HIPAA_COMPLIANCE"})
+
+            obj_stats = objects_by_run.get(
+                rid,
+                {"tables_count": 0, "other_objects_count": 0, "total_objects_count": 0},
+            )
+            scanned_summary = (
+                f"{obj_stats['tables_count']} tables · {obj_stats['other_objects_count']} objects"
+            )
+
+            breakdown = class_by_run.get(rid, {})
+            total_sensitive = sum(breakdown.values())
+            if not has_classification:
+                classification_summary = None
+            elif total_sensitive == 0:
+                classification_summary = "0 sensitive cols"
+            elif len(breakdown) == 1:
+                only_type, only_count = next(iter(breakdown.items()))
+                classification_summary = f"{only_count} {only_type} cols"
+            else:
+                classification_summary = f"{total_sensitive} sensitive cols"
+
+            history.append(
+                {
+                    "run_number": idx,
+                    "run_label": f"#{idx}",
+                    "is_latest": idx == total_runs,
+                    "discovery_run_id": rid,
+                    "connection_id": run["connection_id"],
+                    "status": run["status"],
+                    "current_stage": run["current_stage"],
+                    "progress_percentage": float(run["progress_percentage"])
+                    if run["progress_percentage"] is not None
+                    else None,
+                    "started_by": run["started_by"],
+                    "started_at": run["started_at"].isoformat() if run["started_at"] else None,
+                    "completed_at": run["completed_at"].isoformat() if run["completed_at"] else None,
+                    "created_at": run["created_at"].isoformat() if run["created_at"] else None,
+                    "effective_scopes": list(raw_scopes),
+                    "options_run": {
+                        "classification": has_classification,
+                        "lineage": has_lineage,
+                        "compliance": has_compliance,
+                    },
+                    "tables_count": obj_stats["tables_count"],
+                    "other_objects_count": obj_stats["other_objects_count"],
+                    "total_objects_count": obj_stats["total_objects_count"],
+                    "scanned_summary": scanned_summary,
+                    "total_sensitive_columns": total_sensitive,
+                    "classification_breakdown": breakdown,
+                    "classification_summary": classification_summary,
+                    "compliance_scores": comp_by_run.get(rid, []) if has_compliance else [],
+                }
+            )
+
+        history.reverse()
+        return history
