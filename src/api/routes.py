@@ -768,13 +768,7 @@ def update_remediation_finding(
     return _execute_remediation_update(run_id, payload, database)
 
 
-@router.patch("/discovery-runs/{run_id}/compliance-findings/remediate")
-def remediate_compliance_finding(
-    run_id: UUID,
-    payload: RemediateFindingRequest,
-    database: MetadataDatabase = Depends(get_database),
-) -> dict[str, Any]:
-    return _execute_remediation_update(run_id, payload, database)
+
 
 
 @router.get("/remediation-standards")
