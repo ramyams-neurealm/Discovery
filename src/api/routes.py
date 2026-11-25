@@ -276,6 +276,20 @@ def get_database_connection(
             },
         )
 
+    runs = repository.list_connection_runs(connection_id)
+    if runs:
+        latest = runs[0]
+        record["discovery_status"] = latest.get("status") or record.get("discovery_status")
+        record["last_discovered_at"] = (
+            latest.get("completed_at")
+            or latest.get("started_at")
+            or latest.get("created_at")
+            or record.get("last_discovered_at")
+        )
+        record["latest_run_id"] = latest.get("discovery_run_id")
+    else:
+        record.setdefault("latest_run_id", None)
+
     record.pop("credential_reference", None)
     record.pop("password_encrypted", None)
     return record
