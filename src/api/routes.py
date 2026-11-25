@@ -325,6 +325,55 @@ def list_connection_runs(
         "runs": runs,
     }
 
+@router.get("/connections/{connection_id}/latest-discovery")
+def get_latest_discovery_for_connection(
+    connection_id: int,
+    database: MetadataDatabase = Depends(get_database),
+) -> dict[str, Any]:
+    """Return latest discovery run details and result endpoints for a connection."""
+    repository = _get_repository(database)
+    datasource = repository.get_datasource_connection(connection_id)
+    if datasource is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error_code": "CONNECTION_NOT_FOUND",
+                "message": "Datasource connection not found.",
+            },
+        )
+
+    runs = repository.list_connection_runs(connection_id)
+    if not runs:
+        return {
+            "connection_id": connection_id,
+            "connection_name": datasource.get("connection_name"),
+            "has_discovery": False,
+            "discovery_status": "NOT_STARTED",
+            "latest_run_id": None,
+            "last_discovered_at": None,
+            "runs_url": f"/api/v1/connections/{connection_id}/runs",
+            "results_base_url": None,
+        }
+
+    latest = runs[0]
+    run_id = latest.get("discovery_run_id")
+    last_discovered = (
+        latest.get("completed_at")
+        or latest.get("started_at")
+        or latest.get("created_at")
+    )
+
+    return {
+        "connection_id": connection_id,
+        "connection_name": datasource.get("connection_name"),
+        "has_discovery": True,
+        "discovery_status": latest.get("status"),
+        "latest_run_id": run_id,
+        "last_discovered_at": last_discovered,
+        "runs_url": f"/api/v1/connections/{connection_id}/runs",
+        "results_base_url": f"/api/v1/discovery-runs/{run_id}",
+        "run": latest,
+    }
 
 @router.get("/connections/{connection_id}/objects")
 def list_connection_objects(
