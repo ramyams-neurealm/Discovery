@@ -378,6 +378,99 @@ class DiscoveryRunResponse(BaseModel):
 # ============================================================
 
 
+# class ColumnContext(BaseModel):
+#     """Metadata and masked profiling evidence for classification."""
+
+#     object_id: int = Field(gt=0)
+#     column_id: int | None = Field(default=None, gt=0)
+#     schema_name: str
+#     table_name: str
+#     column_name: str
+#     data_type: str
+#     nullable: bool | None = None
+#     is_primary_key: bool = False
+#     is_foreign_key: bool = False
+#     neighboring_columns: list[str] = Field(default_factory=list)
+#     masked_samples: list[str] = Field(default_factory=list, max_length=3)
+#     null_percentage: float | None = Field(default=None, ge=0, le=100)
+#     distinct_count: int | None = Field(default=None, ge=0)
+#     table_row_count: int | None = Field(default=None, ge=0)
+
+
+# # class ClassificationResult(BaseModel):
+# #     """Structured result returned by the classification agent."""
+
+# #     object_id: int = Field(gt=0)
+# #     schema_name: str
+# #     table_name: str
+# #     column_name: str
+# #     display_classification: DisplayClassification
+# #     sensitive_data_type: str = Field(min_length=1, max_length=128)
+# #     sensitivity_level: str
+# #     is_sensitive: bool
+# #     confidence: float = Field(ge=0, le=1)
+# #     reason: str = Field(min_length=1)
+# #     inference_basis: list[str] = Field(default_factory=list)
+# #     needs_human_review: bool
+# #     review_reason: str | None = None
+
+# # src/models/schemas.py
+
+# # class ClassificationResult(BaseModel):
+# #     """Cleaned structured result: pure classification without verbose rationale."""
+
+# #     object_id: int = Field(gt=0)
+# #     schema_name: str
+# #     table_name: str
+# #     column_name: str
+# #     display_classification: DisplayClassification
+# #     is_sensitive: bool = True
+# #     confidence: float = Field(ge=0, le=1)
+# #     needs_human_review: bool = False
+
+# #     @model_validator(mode="after")
+# #     def ensure_review_reason(self) -> ClassificationResult:
+# #         if self.needs_human_review and not self.review_reason:
+# #             self.review_reason = "Human review is required."
+
+# #         return self
+# # In src/models/schemas.py (around line 280)
+
+# class ClassificationResult(BaseModel):
+#     """Cleaned structured result: pure classification without verbose rationale."""
+
+#     object_id: int = Field(gt=0)
+#     schema_name: str
+#     table_name: str
+#     column_name: str
+#     display_classification: DisplayClassification
+#     sensitive_data_type: str | None = None
+#     is_sensitive: bool = True
+#     confidence: float = Field(ge=0, le=1)
+#     needs_human_review: bool = False
+# # Add this below ClassificationResult in src/models/schemas.py
+
+# class ColumnClassificationItem(BaseModel):
+#     """Cleaned structured result for a single column inside a table batch."""
+#     column_name: str
+#     display_classification: DisplayClassification
+#     sensitive_data_type: str | None = None
+#     confidence: float = Field(ge=0, le=1)
+#     needs_human_review: bool = False
+
+# class TableClassificationBatchResult(BaseModel):
+#     """Structured LLM response model for an entire table batch."""
+#     table_name: str
+#     classifications: list[ColumnClassificationItem] = Field(min_length=1)
+
+
+
+
+# ============================================================
+# Classification models
+# ============================================================
+
+
 class ColumnContext(BaseModel):
     """Metadata and masked profiling evidence for classification."""
 
@@ -397,47 +490,8 @@ class ColumnContext(BaseModel):
     table_row_count: int | None = Field(default=None, ge=0)
 
 
-# class ClassificationResult(BaseModel):
-#     """Structured result returned by the classification agent."""
-
-#     object_id: int = Field(gt=0)
-#     schema_name: str
-#     table_name: str
-#     column_name: str
-#     display_classification: DisplayClassification
-#     sensitive_data_type: str = Field(min_length=1, max_length=128)
-#     sensitivity_level: str
-#     is_sensitive: bool
-#     confidence: float = Field(ge=0, le=1)
-#     reason: str = Field(min_length=1)
-#     inference_basis: list[str] = Field(default_factory=list)
-#     needs_human_review: bool
-#     review_reason: str | None = None
-
-# src/models/schemas.py
-
-# class ClassificationResult(BaseModel):
-#     """Cleaned structured result: pure classification without verbose rationale."""
-
-#     object_id: int = Field(gt=0)
-#     schema_name: str
-#     table_name: str
-#     column_name: str
-#     display_classification: DisplayClassification
-#     is_sensitive: bool = True
-#     confidence: float = Field(ge=0, le=1)
-#     needs_human_review: bool = False
-
-#     @model_validator(mode="after")
-#     def ensure_review_reason(self) -> ClassificationResult:
-#         if self.needs_human_review and not self.review_reason:
-#             self.review_reason = "Human review is required."
-
-#         return self
-# In src/models/schemas.py (around line 280)
-
 class ClassificationResult(BaseModel):
-    """Cleaned structured result: pure classification without verbose rationale."""
+    """Structured column classification result with single-line rationale."""
 
     object_id: int = Field(gt=0)
     schema_name: str
@@ -448,18 +502,30 @@ class ClassificationResult(BaseModel):
     is_sensitive: bool = True
     confidence: float = Field(ge=0, le=1)
     needs_human_review: bool = False
-# Add this below ClassificationResult in src/models/schemas.py
+    reason: str | None = None
+
 
 class ColumnClassificationItem(BaseModel):
-    """Cleaned structured result for a single column inside a table batch."""
+    """Structured result for a single column inside a full-table LLM batch."""
+
     column_name: str
     display_classification: DisplayClassification
     sensitive_data_type: str | None = None
     confidence: float = Field(ge=0, le=1)
     needs_human_review: bool = False
+    reason: str = Field(
+        min_length=1,
+        max_length=250,
+        description=(
+            "Single-line 1-sentence reason citing direct person columns, "
+            "foreign-key table links, or standalone reference status."
+        ),
+    )
+
 
 class TableClassificationBatchResult(BaseModel):
-    """Structured LLM response model for an entire table batch."""
+    """Structured LLM response model for an entire table."""
+
     table_name: str
     classifications: list[ColumnClassificationItem] = Field(min_length=1)
 # ============================================================
