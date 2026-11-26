@@ -9,6 +9,7 @@ class DiscoveryState(TypedDict, total=False):
     selected_objects: list[dict[str, str]]
     selected_frameworks: list[str]
     source_connection: Any
+    datasource: Any
     objects: list[dict[str, Any]]
     table_profiles: list[dict[str, Any]]
     column_profiles: list[dict[str, Any]]

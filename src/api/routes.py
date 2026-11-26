@@ -989,24 +989,40 @@ def export_discovery_run(
     run_id: UUID,
     database: MetadataDatabase = Depends(get_database),
 ) -> JSONResponse:
+    from src.agents.report_agent import ReportGenerationAgent
+    from src.repositories.compliance_repository import ComplianceRepository
+
     repository = _get_repository(database)
     run = _require_discovery_run(repository, run_id)
-    # +++ AFTER +++
-    from src.repositories.compliance_repository import ComplianceRepository
     comp_repo = ComplianceRepository(database)
 
-    payload = {
-        "run": run,
-        "stages": repository.get_run_stages(run_id),
-        "overview": repository.get_overview(run_id),
-        "table_profiles": repository.get_table_profiles_result(run_id),
-        "classifications": repository.get_classifications_result(run_id),
-        "dependencies": repository.get_dependencies_result(run_id),
-        "compliance": comp_repo.get_compliance_results(run_id),
+    datasource = repository.get_datasource_for_run(run_id)
+    objects = repository.get_discovered_objects_result(run_id)
+    table_profiles = repository.get_table_profiles_result(run_id)
+    classifications = repository.get_classifications_result(run_id)
+    dependencies = repository.get_dependencies_result(run_id)
+    compliance_results = comp_repo.get_compliance_results(run_id)
+
+    state = {
+        "discovery_run_id": str(run_id),
+        "connection_id": run.get("connection_id") if isinstance(run, dict) else getattr(run, "connection_id", None),
+        "status": run.get("status") if isinstance(run, dict) else getattr(run, "status", None),
+        "requested_scopes": run.get("requested_scopes") if isinstance(run, dict) else [],
+        "effective_scopes": run.get("effective_scopes") if isinstance(run, dict) else [],
+        "selected_objects": run.get("selected_objects") if isinstance(run, dict) else [],
+        "selected_frameworks": run.get("selected_frameworks") if isinstance(run, dict) else [],
+        "datasource": datasource,
+        "objects": objects,
+        "table_profiles": table_profiles,
+        "classifications": classifications,
+        "dependencies": dependencies,
+        "compliance_results": compliance_results,
     }
 
+    report = ReportGenerationAgent().build(state)
+
     return JSONResponse(
-        content=jsonable_encoder(payload),
+        content=jsonable_encoder(report),
         headers={
             "Content-Disposition": (
                 f'attachment; filename="discovery-{run_id}.json"'

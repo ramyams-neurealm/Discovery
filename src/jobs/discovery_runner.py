@@ -807,6 +807,7 @@ def run_discovery_background(
             source_connection=source_connector,
             selected_objects=selected_objects,
             selected_frameworks=selected_frameworks,
+            datasource=datasource,
         )
 
     except Exception as error:

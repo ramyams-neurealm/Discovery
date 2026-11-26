@@ -3614,6 +3614,7 @@ class DiscoverySupervisor:
         source_connection: Any,
         selected_objects: list[dict[str, str]] | None = None,
         selected_frameworks: list[str] | None = None,
+        datasource: Any = None,
     ) -> DiscoveryState:
         effective_scopes = set(scopes)
         framework_codes = list(selected_frameworks or [])
@@ -3631,6 +3632,7 @@ class DiscoverySupervisor:
             "selected_objects": selected_objects or [],
             "selected_frameworks": framework_codes,
             "source_connection": source_connection,
+            "datasource": datasource,
             "errors": [],
             "status": "PENDING",
         }
