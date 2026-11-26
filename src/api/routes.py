@@ -1006,6 +1006,6 @@ def export_discovery_run(
     }
 
     return Response(
-        content=json.dumps(report, indent=2, default=str),
+        content=json.dumps(payload, indent=2, default=str),
         media_type="application/json",
     )
