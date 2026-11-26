@@ -1008,4 +1008,7 @@ def export_discovery_run(
     return Response(
         content=json.dumps(payload, indent=2, default=str),
         media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="discovery-report-{run_id}.json"'
+        },
     )
