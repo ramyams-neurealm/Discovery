@@ -984,7 +984,7 @@ def update_remediation_standards(
 #     return repository.get_hipaa_result(run_id)
 
 
-@router.get("/discovery-runs/{run_id}/export")
+@router.get("/discovery-runs/{run_id}/export", summary="Export Report")
 def export_discovery_run(
     run_id: UUID,
     database: MetadataDatabase = Depends(get_database),
