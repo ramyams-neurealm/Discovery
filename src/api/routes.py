@@ -988,25 +988,38 @@ def update_remediation_standards(
 def export_discovery_run(
     run_id: UUID,
     database: MetadataDatabase = Depends(get_database),
-) -> JSONResponse:
+) -> Response:
+    from src.agents.report_agent import ReportGenerationAgent
+    from src.repositories.compliance_repository import ComplianceRepository
+
     repository = _get_repository(database)
     run = _require_discovery_run(repository, run_id)
-    # +++ AFTER +++
-    from src.repositories.compliance_repository import ComplianceRepository
     comp_repo = ComplianceRepository(database)
 
-    payload = {
+    discovered_objs_res = repository.get_discovered_objects_result(run_id)
+    objects = (
+        discovered_objs_res.get("objects", [])
+        if isinstance(discovered_objs_res, dict)
+        else (discovered_objs_res or [])
+    )
+
+    state = {
+        "discovery_run_id": str(run_id),
         "run": run,
-        "stages": repository.get_run_stages(run_id),
+        "connection": repository.get_datasource_for_run(run_id),
         "overview": repository.get_overview(run_id),
+        "objects": objects,
         "table_profiles": repository.get_table_profiles_result(run_id),
+        "column_profiles": [],
         "classifications": repository.get_classifications_result(run_id),
         "dependencies": repository.get_dependencies_result(run_id),
-        "compliance": comp_repo.get_compliance_results(run_id),
+        "compliance_results": comp_repo.get_compliance_results(run_id),
     }
 
+    report = ReportGenerationAgent().build(state)
+
     return Response(
-        content=json.dumps(payload, indent=2, default=str),
+        content=json.dumps(report, indent=2, default=str),
         media_type="application/json",
         headers={
             "Content-Disposition": f'attachment; filename="discovery-report-{run_id}.json"'
