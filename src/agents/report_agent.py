@@ -324,8 +324,38 @@ class ReportGenerationAgent:
                         writes.append(w)
 
             definition = obj.get("definition") or obj.get("sql_definition") or ""
-            loc = len(str(definition).splitlines()) if definition else 0
+            raw_loc = len(str(definition).splitlines()) if definition else 0
             extra_meta = obj.get("metadata") or obj.get("properties") or {}
+            extra_dict = extra_meta if isinstance(extra_meta, dict) else {}
+
+            lines_of_code = (
+                raw_loc
+                if raw_loc > 0
+                else int(
+                    extra_dict.get("lines_of_code")
+                    or extra_dict.get("linesOfCode")
+                    or 0
+                )
+            )
+
+            raw_params = (
+                obj.get("parameters")
+                if obj.get("parameters") is not None
+                else obj.get("params")
+            )
+            if raw_params is None or raw_params == 0:
+                params_val = int(
+                    extra_dict.get("parameter_count")
+                    or extra_dict.get("params")
+                    or 0
+                )
+            else:
+                params_val = raw_params
+
+            language_val = obj.get("language") or extra_dict.get("language") or "SQL"
+            if str(language_val).lower() == "sql":
+                language_val = "SQL"
+
             updated = obj.get("last_altered") or obj.get("updated_at")
             last_altered = (
                 updated.isoformat()
@@ -339,17 +369,17 @@ class ReportGenerationAgent:
                     "type": obj_type.lower(),
                     "reads": reads,
                     "writes": writes,
-                    "params": obj.get("parameters") or obj.get("params") or 0,
-                    "language": obj.get("language") or "SQL",
-                    "linesOfCode": loc,
+                    "params": params_val,
+                    "language": language_val,
+                    "linesOfCode": lines_of_code,
                     "lastAltered": last_altered,
-                    "extra": extra_meta if isinstance(extra_meta, dict) else {},
+                    "extra": extra_dict,
                     "complexity": "Low",
                 }
             )
 
         return result_objects
-
+    
     def _build_dependency_graph(
         self,
         objects: list[Any],
