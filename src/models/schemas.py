@@ -104,14 +104,13 @@ class ConnectionInput(BaseModel):
         return cleaned_value or None
 
 class ConnectionUpdate(BaseModel):
-    """Optional fields used to update a saved database connection."""
+    """Optional fields used to update a saved database connection.
+
+    Locked fields (database_type, host, database_name, schema_name) are
+    omitted so they cannot be modified after creation.
+    """
 
     connection_name: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=255,
-    )
-    host: str | None = Field(
         default=None,
         min_length=1,
         max_length=255,
@@ -120,15 +119,6 @@ class ConnectionUpdate(BaseModel):
         default=None,
         ge=1,
         le=65535,
-    )
-    database_name: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=255,
-    )
-    schema_name: str | None = Field(
-        default=None,
-        max_length=255,
     )
     username: str | None = Field(
         default=None,
@@ -140,8 +130,6 @@ class ConnectionUpdate(BaseModel):
 
     @field_validator(
         "connection_name",
-        "host",
-        "database_name",
         "username",
         mode="before",
     )
@@ -159,22 +147,6 @@ class ConnectionUpdate(BaseModel):
             raise ValueError("Value must not be blank")
 
         return cleaned_value
-    @field_validator(
-        "schema_name",
-        mode="before",
-    )
-    @classmethod
-    def strip_optional_schema_name(
-        cls,
-        value: str | None,
-    ) -> str | None:
-        if value is None:
-            return None
-
-        if not isinstance(value, str):
-            return value
-
-        return value.strip() or None
 
 
 class ConnectionSafeResponse(BaseModel):
