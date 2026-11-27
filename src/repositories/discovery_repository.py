@@ -2225,6 +2225,16 @@ class DiscoveryRepository:
                 - numeric_column_count
                 - other_column_count
             )
+            missing_column_count = sum(
+                1
+                for column in column_profiles
+                if (column.get("null_count") or 0) > 0
+                or float(column.get("null_percentage") or 0) > 0
+            )
+            table_null_percentage = float(
+                table.get("average_null_percentage") or 0
+            )
+
             object_metadata = table.get("object_metadata") or {}
             profile_metadata = table.get("profile_metadata") or {}
 
@@ -2253,6 +2263,7 @@ class DiscoveryRepository:
                     "data_type": column["data_type"],
                     "distinct_count": column["distinct_count"],
                     "mean": column["mean"],
+                    "null_percentage": column["null_percentage"],
                 }
                 for column in column_profiles
             ]
@@ -2275,6 +2286,8 @@ class DiscoveryRepository:
                 },
                 "data_quality_profile": {
                     "missing_cells": missing_cells,
+                    "missing_column_count": missing_column_count,
+                    "null_percentage": table_null_percentage,
                     "numeric_column_count": numeric_column_count,
                     "categorical_column_count": (
                         categorical_column_count
